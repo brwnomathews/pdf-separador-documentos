@@ -1,6 +1,5 @@
 import streamlit as st
 import fitz  # PyMuPDF
-import easyocr
 import cv2
 import numpy as np
 import pypdf
@@ -11,10 +10,11 @@ import pytesseract
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PDF Smart Splitter", page_icon="📄", layout="centered")
 
-# --- CARREGAMENTO DO MODELO OCR ---
-# Mantemos o cache para que o download pesado só aconteça uma única vez
+# --- CARREGAMENTO DO MODELO OCR (LAZY LOADING) ---
+# A IA só será importada e baixada quando essa função for chamada
 @st.cache_resource
 def carregar_leitor_ocr():
+    import easyocr # NOVO: A importação acontece apenas aqui dentro!
     return easyocr.Reader(['pt'], gpu=False)
 
 # --- FUNÇÕES DE VISÃO COMPUTACIONAL ---
@@ -52,7 +52,6 @@ def endireitar_imagem(image_np):
     return rotated
 
 # --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO ---
-# Adicionamos o "reader" como um parâmetro que será passado para esta função
 def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso, leitor_ocr):
     lista_arquivos_prontos = []
     
@@ -83,7 +82,6 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso, le
             img_orientada = corrigir_orientacao(img_np)
             img_endireitada = endireitar_imagem(img_orientada)
             
-            # Usamos a IA que foi ativada após o clique do botão
             resultados_ocr = leitor_ocr.readtext(img_endireitada, detail=0)
             texto_completo = " ".join(resultados_ocr)
             
@@ -140,7 +138,7 @@ if arquivos:
         try:
             espaco_texto.info("Iniciando motor de OCR... Baixando a inteligência artificial pela primeira vez (pode levar alguns minutos).")
             
-            # NOVO: O carregamento pesado só acontece AQUI, depois que a tela já carregou com sucesso!
+            # Aqui chamamos a função que, internamente, importará o easyocr e fará o download
             leitor_ativo = carregar_leitor_ocr()
             
             espaco_texto.info("Lendo documentos com resolução de 300 DPI...")
