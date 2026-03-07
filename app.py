@@ -38,13 +38,12 @@ def endireitar_imagem(image_np):
     return rotated
 
 # --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO ---
-# Recebemos os placeholders como parâmetros para atualizar a tela de forma segura
 def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
     zip_buffer = io.BytesIO()
+    arquivos_gerados = 0  # NOVO: Vamos contar quantos arquivos foram criados
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for arquivo in arquivos_upados:
-            # Atualiza o texto fixo na tela
             placeholder_texto.markdown(f"⏳ Processando arquivo: **{arquivo.name}**")
             
             arquivo_bytes = arquivo.read()
@@ -52,16 +51,11 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
             pdf_original = pypdf.PdfReader(io.BytesIO(arquivo_bytes))
             
             paginas_buffer = []
-            
-            # Cria a barra de progresso UMA VEZ por arquivo dentro do espaço fixo
             barra = placeholder_progresso.progress(0)
-            
             total_paginas = len(pdf_original.pages)
             
             for i in range(total_paginas):
-                # Atualiza a barra de progresso de forma segura
                 barra.progress((i + 1) / total_paginas)
-                
                 paginas_buffer.append(i)
                 
                 pagina = doc_imagens.load_page(i)
@@ -96,12 +90,17 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
                         pdf_writer.write(pdf_out_buffer)
                         zip_file.writestr(f"{nome_sugerido}.pdf", pdf_out_buffer.getvalue())
                         
+                        arquivos_gerados += 1  # NOVO: Registra que achou um documento
                         paginas_buffer = []
                         
             doc_imagens.close()
             
-    zip_buffer.seek(0)
-    return zip_buffer
+    # NOVO: Se passou por tudo e não achou nenhuma tag, interrompemos com erro amigável
+    if arquivos_gerados == 0:
+        raise ValueError("Nenhuma tag de separação (ex: @@Nome$$) foi encontrada pelo OCR nos PDFs enviados. O arquivo ZIP ficaria vazio.")
+            
+    # NOVO: Usamos .getvalue() para garantir que os bytes puros sejam enviados para download
+    return zip_buffer.getvalue()
 
 # --- INTERFACE DO USUÁRIO (FRONT-END) ---
 st.title("📄 PDF Smart Splitter")
@@ -113,18 +112,15 @@ arquivos = st.file_uploader("Arraste seus PDFs aqui", type=["pdf"], accept_multi
 
 if arquivos:
     if st.button("PROCESSAR E GERAR ZIP", type="primary"):
-        
-        # 1. Criamos espaços vazios e fixos na tela ANTES de começar o trabalho pesado
         espaco_texto = st.empty()
         espaco_progresso = st.empty()
         
         try:
             espaco_texto.info("Iniciando motor de OCR... Isso pode levar alguns minutos.")
             
-            # 2. Passamos os espaços vazios para a função usar
-            arquivo_zip = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
+            # Puxamos os bytes reais do arquivo agora
+            arquivo_zip_bytes = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
             
-            # 3. Limpamos a tela e mostramos o sucesso
             espaco_texto.empty()
             espaco_progresso.empty()
             
@@ -134,9 +130,12 @@ if arquivos:
             st.success("✅ Concluído com sucesso!")
             st.download_button(
                 label="⬇️ BAIXAR ARQUIVOS PROCESSADOS",
-                data=arquivo_zip,
+                data=arquivo_zip_bytes,
                 file_name=nome_zip,
                 mime="application/zip"
             )
         except Exception as e:
-            st.error(f"Ocorreu um erro durante o processamento: {str(e)}")
+            # Limpa as caixas de carregamento se der erro
+            espaco_texto.empty()
+            espaco_progresso.empty()
+            st.warning(f"Atenção: {str(e)}")
