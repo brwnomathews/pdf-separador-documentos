@@ -75,19 +75,19 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
             img_orientada = corrigir_orientacao(img_np)
             img_endireitada = endireitar_imagem(img_orientada)
             
-            # A MÁGICA NOVA: Usamos o Tesseract para ler a página!
-            # Muito mais rápido e não explode a memória do servidor
             texto_completo = pytesseract.image_to_string(img_endireitada, lang='por')
-            texto_completo = texto_completo.replace('\n', ' ') # Remove quebras de linha para o Regex funcionar
+            texto_completo = texto_completo.replace('\n', ' ') 
             
             with st.expander(f"🔍 Raio-X da Página {i+1}"):
                 st.write(texto_completo)
             
-            regex_prioridade = r'@@(.{1,100}?)\$\$|@@(.{1,100}?)\$|@@(.{1,100}?\d{8})'
+            # NOVO REGEX: Utilizando a tag NOMEARQ ... TERMARQ
+            regex_prioridade = r'NOMEARQ\s*(.{1,100}?)\s*TERMARQ'
             match = re.search(regex_prioridade, texto_completo)
             
             if match:
-                nome_extraido = match.group(1) or match.group(2) or match.group(3)
+                nome_extraido = match.group(1)
+                
                 if nome_extraido:
                     nome_sugerido = re.sub(r'\s+', ' ', nome_extraido).strip()
                     nome_sugerido = re.sub(r'NR0I|NR0l|NROI|NROl', 'NR01', nome_sugerido)
@@ -111,14 +111,16 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
         doc_imagens.close()
         
     if len(lista_arquivos_prontos) == 0:
-        raise ValueError("Nenhuma tag de separação válida foi encontrada. Verifique o Painel de Raio-X.")
+        raise ValueError("Nenhuma tag de separação (NOMEARQ ... TERMARQ) foi encontrada. Verifique o Painel de Raio-X.")
         
     return lista_arquivos_prontos
 
 # --- INTERFACE DO USUÁRIO (FRONT-END) ---
 st.title("📄 PDF Smart Splitter")
 st.markdown("**BM Automações** | Separador com Auto-Endireitamento e OCR Tesseract")
-st.info("Renomeador e Separador de Documentos: `@@Nome - Tipo - Data$$`")
+
+# AVISO ATUALIZADO NA TELA
+st.info("Renomeador e Separador de Documentos: `NOMEARQ Nome - Tipo - Data TERMARQ`")
 
 if "arquivos_processados" not in st.session_state:
     st.session_state.arquivos_processados = []
