@@ -40,7 +40,7 @@ def endireitar_imagem(image_np):
 # --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO ---
 def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
     zip_buffer = io.BytesIO()
-    arquivos_gerados = 0  # NOVO: Vamos contar quantos arquivos foram criados
+    arquivos_gerados = 0 
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for arquivo in arquivos_upados:
@@ -90,52 +90,57 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
                         pdf_writer.write(pdf_out_buffer)
                         zip_file.writestr(f"{nome_sugerido}.pdf", pdf_out_buffer.getvalue())
                         
-                        arquivos_gerados += 1  # NOVO: Registra que achou um documento
+                        arquivos_gerados += 1 
                         paginas_buffer = []
                         
             doc_imagens.close()
             
-    # NOVO: Se passou por tudo e não achou nenhuma tag, interrompemos com erro amigável
     if arquivos_gerados == 0:
-        raise ValueError("Nenhuma tag de separação (ex: @@Nome$$) foi encontrada pelo OCR nos PDFs enviados. O arquivo ZIP ficaria vazio.")
+        raise ValueError("Nenhuma tag de separação foi encontrada pelo OCR.")
             
-    # NOVO: Usamos .getvalue() para garantir que os bytes puros sejam enviados para download
     return zip_buffer.getvalue()
 
 # --- INTERFACE DO USUÁRIO (FRONT-END) ---
 st.title("📄 PDF Smart Splitter")
 st.markdown("**BM Automações** | Separador com Auto-Endireitamento e OCR")
-
 st.info("Renomeador e Separador de Documentos: `@@Nome - Tipo - Data$$`")
+
+# Inicializa a memória do Streamlit para o nosso arquivo ZIP
+if "arquivo_zip_pronto" not in st.session_state:
+    st.session_state.arquivo_zip_pronto = None
 
 arquivos = st.file_uploader("Arraste seus PDFs aqui", type=["pdf"], accept_multiple_files=True)
 
 if arquivos:
-    if st.button("PROCESSAR E GERAR ZIP", type="primary"):
+    # O botão de processar apenas GERA e SALVA o arquivo na memória
+    if st.button("PROCESSAR ARQUIVOS", type="primary"):
         espaco_texto = st.empty()
         espaco_progresso = st.empty()
         
         try:
             espaco_texto.info("Iniciando motor de OCR... Isso pode levar alguns minutos.")
             
-            # Puxamos os bytes reais do arquivo agora
-            arquivo_zip_bytes = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
+            # Salva o arquivo final diretamente na "memória" da sessão
+            st.session_state.arquivo_zip_pronto = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
             
             espaco_texto.empty()
             espaco_progresso.empty()
+            st.success("✅ Processamento concluído! O botão de download apareceu abaixo.")
             
-            data_atual = datetime.datetime.now().strftime("%Y-%m-%d")
-            nome_zip = f"Lote_Processado_{data_atual}.zip"
-            
-            st.success("✅ Concluído com sucesso!")
-            st.download_button(
-                label="⬇️ BAIXAR ARQUIVOS PROCESSADOS",
-                data=arquivo_zip_bytes,
-                file_name=nome_zip,
-                mime="application/zip"
-            )
         except Exception as e:
-            # Limpa as caixas de carregamento se der erro
             espaco_texto.empty()
             espaco_progresso.empty()
             st.warning(f"Atenção: {str(e)}")
+
+# O botão de download fica FORA da verificação do botão "PROCESSAR"
+# Ele só aparece se existir um arquivo na memória
+if st.session_state.arquivo_zip_pronto is not None:
+    data_atual = datetime.datetime.now().strftime("%Y-%m-%d")
+    nome_zip = f"Lote_Processado_{data_atual}.zip"
+    
+    st.download_button(
+        label="⬇️ BAIXAR ARQUIVOS PROCESSADOS",
+        data=st.session_state.arquivo_zip_pronto,
+        file_name=nome_zip,
+        mime="application/zip"
+    )
