@@ -11,23 +11,24 @@ import pytesseract
 st.set_page_config(page_title="PDF Smart Splitter", page_icon="📄", layout="centered")
 
 # --- FUNÇÕES DE VISÃO COMPUTACIONAL ---
-def corrigir_orientacao(img_np):
+def descobrir_angulo(img_np):
+    """
+    Pergunta ao Tesseract quantos graus a página precisa girar (sentido horário)
+    para ficar de pé (0, 90, 180 ou 270 graus).
+    """
     try:
         gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
         osd = pytesseract.image_to_osd(gray)
-        angulo_rotacao = int(re.search(r'(?<=Rotate: )\d+', osd).group(0))
-        
-        if angulo_rotacao == 90:
-            img_np = cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE)
-        elif angulo_rotacao == 180:
-            img_np = cv2.rotate(img_np, cv2.ROTATE_180)
-        elif angulo_rotacao == 270:
-            img_np = cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        angulo = int(re.search(r'(?<=Rotate: )\d+', osd).group(0))
+        return angulo
     except Exception:
-        pass
-    return img_np
+        # Se for uma página em branco ou sem texto identificável, não gira.
+        return 0
 
 def endireitar_imagem(image_np):
+    """
+    Faz o ajuste fino de pequenos desvios (ex: página escaneada 5 graus torta).
+    """
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     gray = cv2.bitwise_not(gray)
     coords = np.column_stack(np.where(gray > 0))
@@ -72,16 +73,29 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
             elif pix.n == 1:
                 img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
             
-            img_orientada = corrigir_orientacao(img_np)
-            img_endireitada = endireitar_imagem(img_orientada)
+            # 1. Descobre se a página está de cabeça para baixo ou de lado
+            angulo = descobrir_angulo(img_np)
             
+            # 2. SEGREDO REVELADO: Giramos a página original do PDF de forma permanente!
+            if angulo != 0:
+                pdf_original.pages[i].rotate(angulo)
+            
+            # 3. Giramos a imagem para o nosso OCR também conseguir ler
+            if angulo == 90:
+                img_np = cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE)
+            elif angulo == 180:
+                img_np = cv2.rotate(img_np, cv2.ROTATE_180)
+            elif angulo == 270:
+                img_np = cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                
+            # 4. Ajuste fino e OCR
+            img_endireitada = endireitar_imagem(img_np)
             texto_completo = pytesseract.image_to_string(img_endireitada, lang='por')
             texto_completo = texto_completo.replace('\n', ' ') 
             
-            with st.expander(f"🔍 Raio-X da Página {i+1}"):
+            with st.expander(f"🔍 Raio-X da Página {i+1} (Ângulo Corrigido: {angulo}º)"):
                 st.write(texto_completo)
             
-            # NOVO REGEX: Utilizando a tag NOMEARQ ... TERMARQ
             regex_prioridade = r'NOMEARQ\s*(.{1,100}?)\s*TERMARQ'
             match = re.search(regex_prioridade, texto_completo)
             
@@ -96,6 +110,7 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
                     nome_final = f"{nome_sugerido}.pdf"
                     
                     pdf_writer = pypdf.PdfWriter()
+                    # Como já giramos a página lá em cima (Passo 2), ela vai entrar certinha aqui!
                     for p_num in paginas_buffer:
                         pdf_writer.add_page(pdf_original.pages[p_num])
                     
@@ -118,8 +133,6 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
 # --- INTERFACE DO USUÁRIO (FRONT-END) ---
 st.title("📄 PDF Smart Splitter")
 st.markdown("**BM Automações** | Separador com Auto-Endireitamento e OCR Tesseract")
-
-# AVISO ATUALIZADO NA TELA
 st.info("Renomeador e Separador de Documentos: `NOMEARQ Nome - Tipo - Data TERMARQ`")
 
 if "arquivos_processados" not in st.session_state:
@@ -133,7 +146,7 @@ if arquivos:
         espaco_progresso = st.empty()
         
         try:
-            espaco_texto.info("Lendo documentos com OCR e Endireitamento automático...")
+            espaco_texto.info("Lendo documentos com OCR e corrigindo orientação das páginas...")
             st.session_state.arquivos_processados = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
             
             espaco_texto.empty()
