@@ -5,9 +5,7 @@ import cv2
 import numpy as np
 import pypdf
 import io
-import zipfile
 import re
-import datetime
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PDF Smart Splitter", page_icon="📄", layout="centered")
@@ -39,80 +37,82 @@ def endireitar_imagem(image_np):
 
 # --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO ---
 def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
-    zip_buffer = io.BytesIO()
-    arquivos_gerados = 0 
+    lista_arquivos_prontos = [] # NOVO: Lista para guardar os PDFs individualmente
     
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for arquivo in arquivos_upados:
-            placeholder_texto.markdown(f"⏳ Processando arquivo: **{arquivo.name}**")
+    for arquivo in arquivos_upados:
+        placeholder_texto.markdown(f"⏳ Processando arquivo: **{arquivo.name}**")
+        
+        arquivo_bytes = arquivo.read()
+        doc_imagens = fitz.open(stream=arquivo_bytes, filetype="pdf")
+        pdf_original = pypdf.PdfReader(io.BytesIO(arquivo_bytes))
+        
+        paginas_buffer = []
+        barra = placeholder_progresso.progress(0)
+        total_paginas = len(pdf_original.pages)
+        
+        for i in range(total_paginas):
+            barra.progress((i + 1) / total_paginas)
+            paginas_buffer.append(i)
             
-            arquivo_bytes = arquivo.read()
-            doc_imagens = fitz.open(stream=arquivo_bytes, filetype="pdf")
-            pdf_original = pypdf.PdfReader(io.BytesIO(arquivo_bytes))
+            pagina = doc_imagens.load_page(i)
+            pix = pagina.get_pixmap(dpi=150)
+            img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
             
-            paginas_buffer = []
-            barra = placeholder_progresso.progress(0)
-            total_paginas = len(pdf_original.pages)
+            if pix.n == 4:
+                img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2RGB)
+            elif pix.n == 1:
+                img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
             
-            for i in range(total_paginas):
-                barra.progress((i + 1) / total_paginas)
-                paginas_buffer.append(i)
+            img_endireitada = endireitar_imagem(img_np)
+            resultados_ocr = reader.readtext(img_endireitada, detail=0)
+            texto_completo = " ".join(resultados_ocr)
+            
+            regex_prioridade = r'@@(.*?)\$\$|@@(.*?)\$|@@(.*?(\d{8}))'
+            match = re.search(regex_prioridade, texto_completo)
+            
+            if match:
+                nome_extraido = match.group(1) or match.group(2) or match.group(3)
                 
-                pagina = doc_imagens.load_page(i)
-                pix = pagina.get_pixmap(dpi=150)
-                img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-                
-                if pix.n == 4:
-                    img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2RGB)
-                elif pix.n == 1:
-                    img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
-                
-                img_endireitada = endireitar_imagem(img_np)
-                resultados_ocr = reader.readtext(img_endireitada, detail=0)
-                texto_completo = " ".join(resultados_ocr)
-                
-                regex_prioridade = r'@@(.*?)\$\$|@@(.*?)\$|@@(.*?(\d{8}))'
-                match = re.search(regex_prioridade, texto_completo)
-                
-                if match:
-                    nome_extraido = match.group(1) or match.group(2) or match.group(3)
+                if nome_extraido:
+                    nome_sugerido = re.sub(r'\s+', ' ', nome_extraido).strip()
+                    nome_sugerido = re.sub(r'NR0I|NR0l|NROI|NROl', 'NR01', nome_sugerido)
+                    nome_sugerido = re.sub(r'[\\/:*?"<>|]', '', nome_sugerido)
+                    nome_final = f"{nome_sugerido}.pdf"
                     
-                    if nome_extraido:
-                        nome_sugerido = re.sub(r'\s+', ' ', nome_extraido).strip()
-                        nome_sugerido = re.sub(r'NR0I|NR0l|NROI|NROl', 'NR01', nome_sugerido)
-                        nome_sugerido = re.sub(r'[\\/:*?"<>|]', '', nome_sugerido)
-                        
-                        pdf_writer = pypdf.PdfWriter()
-                        for p_num in paginas_buffer:
-                            pdf_writer.add_page(pdf_original.pages[p_num])
-                        
-                        pdf_out_buffer = io.BytesIO()
-                        pdf_writer.write(pdf_out_buffer)
-                        zip_file.writestr(f"{nome_sugerido}.pdf", pdf_out_buffer.getvalue())
-                        
-                        arquivos_gerados += 1 
-                        paginas_buffer = []
-                        
-            doc_imagens.close()
-            
-    if arquivos_gerados == 0:
-        raise ValueError("Nenhuma tag de separação foi encontrada pelo OCR.")
-            
-    return zip_buffer.getvalue()
+                    pdf_writer = pypdf.PdfWriter()
+                    for p_num in paginas_buffer:
+                        pdf_writer.add_page(pdf_original.pages[p_num])
+                    
+                    pdf_out_buffer = io.BytesIO()
+                    pdf_writer.write(pdf_out_buffer)
+                    
+                    # NOVO: Adiciona o arquivo gerado à nossa lista
+                    lista_arquivos_prontos.append({
+                        "nome": nome_final,
+                        "dados": pdf_out_buffer.getvalue()
+                    })
+                    
+                    paginas_buffer = []
+                    
+        doc_imagens.close()
+        
+    if len(lista_arquivos_prontos) == 0:
+        raise ValueError("Nenhuma tag de separação foi encontrada pelo OCR em nenhum documento.")
+        
+    return lista_arquivos_prontos
 
 # --- INTERFACE DO USUÁRIO (FRONT-END) ---
 st.title("📄 PDF Smart Splitter")
 st.markdown("**BM Automações** | Separador com Auto-Endireitamento e OCR")
 st.info("Renomeador e Separador de Documentos: `@@Nome - Tipo - Data$$`")
 
-# Inicializa a memória do Streamlit para o nosso arquivo ZIP
-if "arquivo_zip_pronto" not in st.session_state:
-    st.session_state.arquivo_zip_pronto = None
+# Inicializa a memória do Streamlit para a lista de PDFs
+if "arquivos_processados" not in st.session_state:
+    st.session_state.arquivos_processados = []
 
 arquivos = st.file_uploader("Arraste seus PDFs aqui", type=["pdf"], accept_multiple_files=True)
 
 if arquivos:
-    # O botão de processar apenas GERA e SALVA o arquivo na memória
     if st.button("PROCESSAR ARQUIVOS", type="primary"):
         espaco_texto = st.empty()
         espaco_progresso = st.empty()
@@ -120,27 +120,40 @@ if arquivos:
         try:
             espaco_texto.info("Iniciando motor de OCR... Isso pode levar alguns minutos.")
             
-            # Salva o arquivo final diretamente na "memória" da sessão
-            st.session_state.arquivo_zip_pronto = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
+            # Executa a função e guarda a lista de PDFs na memória
+            st.session_state.arquivos_processados = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
             
             espaco_texto.empty()
             espaco_progresso.empty()
-            st.success("✅ Processamento concluído! O botão de download apareceu abaixo.")
+            st.success("✅ Processamento concluído! Baixe seus arquivos abaixo.")
             
         except Exception as e:
             espaco_texto.empty()
             espaco_progresso.empty()
             st.warning(f"Atenção: {str(e)}")
 
-# O botão de download fica FORA da verificação do botão "PROCESSAR"
-# Ele só aparece se existir um arquivo na memória
-if st.session_state.arquivo_zip_pronto is not None:
-    data_atual = datetime.datetime.now().strftime("%Y-%m-%d")
-    nome_zip = f"Lote_Processado_{data_atual}.zip"
+# --- ÁREA DE DOWNLOAD INDIVIDUAL ---
+if st.session_state.arquivos_processados:
+    st.markdown("### 📂 Arquivos Gerados")
     
-    st.download_button(
-        label="⬇️ BAIXAR ARQUIVOS PROCESSADOS",
-        data=st.session_state.arquivo_zip_pronto,
-        file_name=nome_zip,
-        mime="application/zip"
-    )
+    # Cria uma lista visual bem bacana para baixar um por um
+    for arquivo_pronto in st.session_state.arquivos_processados:
+        # Usa colunas para colocar o nome do lado esquerdo e o botão do lado direito
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            st.write(f"📄 **{arquivo_pronto['nome']}**")
+        with col2:
+            st.download_button(
+                label="Baixar",
+                data=arquivo_pronto['dados'],
+                file_name=arquivo_pronto['nome'],
+                mime="application/pdf",
+                key=arquivo_pronto['nome'] # Chave única para evitar conflitos de botões
+            )
+    
+    st.markdown("---")
+    # Botão para limpar a tela e começar de novo
+    if st.button("🧹 Limpar Lista e Começar de Novo"):
+        st.session_state.arquivos_processados = []
+        st.rerun()
