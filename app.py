@@ -6,6 +6,7 @@ import numpy as np
 import pypdf
 import io
 import re
+import pytesseract
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PDF Smart Splitter", page_icon="📄", layout="centered")
@@ -17,11 +18,42 @@ def carregar_leitor_ocr():
 
 reader = carregar_leitor_ocr()
 
-# --- FUNÇÃO PARA ENDIREITAR A IMAGEM ---
+# --- 1. FUNÇÃO PARA CORRIGIR A ORIENTAÇÃO (CABEÇA PARA BAIXO/LADOS) ---
+def corrigir_orientacao(img_np):
+    try:
+        # Converte para tons de cinza para ajudar a leitura
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        
+        # Pede ao Tesseract para analisar a orientação da página
+        osd = pytesseract.image_to_osd(gray)
+        
+        # Procura no resultado qual é o ângulo que o Tesseract detectou
+        angulo_rotacao = int(re.search(r'(?<=Rotate: )\d+', osd).group(0))
+        
+        # Gira a imagem para deixá-la em 0 graus (em pé)
+        if angulo_rotacao == 90:
+            img_np = cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE)
+        elif angulo_rotacao == 180:
+            img_np = cv2.rotate(img_np, cv2.ROTATE_180)
+        elif angulo_rotacao == 270:
+            img_np = cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            
+    except Exception:
+        # Se a página for apenas uma imagem sem texto ou o Tesseract falhar, 
+        # ignoramos e deixamos a imagem como está.
+        pass
+        
+    return img_np
+
+# --- 2. FUNÇÃO PARA ENDIREITAR A IMAGEM (DESKEW FINO) ---
 def endireitar_imagem(image_np):
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     gray = cv2.bitwise_not(gray)
     coords = np.column_stack(np.where(gray > 0))
+    
+    if len(coords) == 0:
+        return image_np
+        
     angle = cv2.minAreaRect(coords)[-1]
     
     if angle < -45:
@@ -37,7 +69,7 @@ def endireitar_imagem(image_np):
 
 # --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO ---
 def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
-    lista_arquivos_prontos = [] # NOVO: Lista para guardar os PDFs individualmente
+    lista_arquivos_prontos = []
     
     for arquivo in arquivos_upados:
         placeholder_texto.markdown(f"⏳ Processando arquivo: **{arquivo.name}**")
@@ -63,11 +95,17 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
             elif pix.n == 1:
                 img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
             
-            img_endireitada = endireitar_imagem(img_np)
+            # NOVO FLUXO DE CORREÇÃO VISUAL:
+            # 1. Desvira a página se estiver de cabeça para baixo
+            img_orientada = corrigir_orientacao(img_np)
+            # 2. Endireita a página se estiver um pouco torta
+            img_endireitada = endireitar_imagem(img_orientada)
+            
+            # Aplica o OCR na imagem já 100% corrigida
             resultados_ocr = reader.readtext(img_endireitada, detail=0)
             texto_completo = " ".join(resultados_ocr)
             
-            regex_prioridade = r'@@(.*?)\$\$|@@(.*?)\$|@@(.*?(\d{8}))'
+            regex_prioridade = r'@@(.{1,100}?)\$\$|@@(.{1,100}?)\$|@@(.{1,100}?\d{8})'
             match = re.search(regex_prioridade, texto_completo)
             
             if match:
@@ -77,6 +115,7 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
                     nome_sugerido = re.sub(r'\s+', ' ', nome_extraido).strip()
                     nome_sugerido = re.sub(r'NR0I|NR0l|NROI|NROl', 'NR01', nome_sugerido)
                     nome_sugerido = re.sub(r'[\\/:*?"<>|]', '', nome_sugerido)
+                    nome_sugerido = nome_sugerido[:100] 
                     nome_final = f"{nome_sugerido}.pdf"
                     
                     pdf_writer = pypdf.PdfWriter()
@@ -86,7 +125,6 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
                     pdf_out_buffer = io.BytesIO()
                     pdf_writer.write(pdf_out_buffer)
                     
-                    # NOVO: Adiciona o arquivo gerado à nossa lista
                     lista_arquivos_prontos.append({
                         "nome": nome_final,
                         "dados": pdf_out_buffer.getvalue()
@@ -97,7 +135,7 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
         doc_imagens.close()
         
     if len(lista_arquivos_prontos) == 0:
-        raise ValueError("Nenhuma tag de separação foi encontrada pelo OCR em nenhum documento.")
+        raise ValueError("Nenhuma tag de separação válida foi encontrada. Verifique se os documentos contêm a tag @@Nome$$ legível.")
         
     return lista_arquivos_prontos
 
@@ -106,7 +144,6 @@ st.title("📄 PDF Smart Splitter")
 st.markdown("**BM Automações** | Separador com Auto-Endireitamento e OCR")
 st.info("Renomeador e Separador de Documentos: `@@Nome - Tipo - Data$$`")
 
-# Inicializa a memória do Streamlit para a lista de PDFs
 if "arquivos_processados" not in st.session_state:
     st.session_state.arquivos_processados = []
 
@@ -119,8 +156,6 @@ if arquivos:
         
         try:
             espaco_texto.info("Iniciando motor de OCR... Isso pode levar alguns minutos.")
-            
-            # Executa a função e guarda a lista de PDFs na memória
             st.session_state.arquivos_processados = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
             
             espaco_texto.empty()
@@ -136,11 +171,8 @@ if arquivos:
 if st.session_state.arquivos_processados:
     st.markdown("### 📂 Arquivos Gerados")
     
-    # Cria uma lista visual bem bacana para baixar um por um
     for arquivo_pronto in st.session_state.arquivos_processados:
-        # Usa colunas para colocar o nome do lado esquerdo e o botão do lado direito
         col1, col2 = st.columns([3, 1])
-        
         with col1:
             st.write(f"📄 **{arquivo_pronto['nome']}**")
         with col2:
@@ -149,11 +181,10 @@ if st.session_state.arquivos_processados:
                 data=arquivo_pronto['dados'],
                 file_name=arquivo_pronto['nome'],
                 mime="application/pdf",
-                key=arquivo_pronto['nome'] # Chave única para evitar conflitos de botões
+                key=arquivo_pronto['nome']
             )
     
     st.markdown("---")
-    # Botão para limpar a tela e começar de novo
     if st.button("🧹 Limpar Lista e Começar de Novo"):
         st.session_state.arquivos_processados = []
         st.rerun()
