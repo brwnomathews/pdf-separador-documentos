@@ -1,6 +1,5 @@
 streamlit
 PyMuPDF
-easyocr
 opencv-python-headless
 numpy
 pypdf
