@@ -10,13 +10,6 @@ import pytesseract
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PDF Smart Splitter", page_icon="📄", layout="centered")
 
-# --- CARREGAMENTO DO MODELO OCR (LAZY LOADING) ---
-# A IA só será importada e baixada quando essa função for chamada
-@st.cache_resource
-def carregar_leitor_ocr():
-    import easyocr # NOVO: A importação acontece apenas aqui dentro!
-    return easyocr.Reader(['pt'], gpu=False)
-
 # --- FUNÇÕES DE VISÃO COMPUTACIONAL ---
 def corrigir_orientacao(img_np):
     try:
@@ -52,7 +45,7 @@ def endireitar_imagem(image_np):
     return rotated
 
 # --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO ---
-def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso, leitor_ocr):
+def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
     lista_arquivos_prontos = []
     
     for arquivo in arquivos_upados:
@@ -82,10 +75,12 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso, le
             img_orientada = corrigir_orientacao(img_np)
             img_endireitada = endireitar_imagem(img_orientada)
             
-            resultados_ocr = leitor_ocr.readtext(img_endireitada, detail=0)
-            texto_completo = " ".join(resultados_ocr)
+            # A MÁGICA NOVA: Usamos o Tesseract para ler a página!
+            # Muito mais rápido e não explode a memória do servidor
+            texto_completo = pytesseract.image_to_string(img_endireitada, lang='por')
+            texto_completo = texto_completo.replace('\n', ' ') # Remove quebras de linha para o Regex funcionar
             
-            with st.expander(f"🔍 Raio-X da Página {i+1} (Clique para ver o que o robô leu)"):
+            with st.expander(f"🔍 Raio-X da Página {i+1}"):
                 st.write(texto_completo)
             
             regex_prioridade = r'@@(.{1,100}?)\$\$|@@(.{1,100}?)\$|@@(.{1,100}?\d{8})'
@@ -116,13 +111,13 @@ def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso, le
         doc_imagens.close()
         
     if len(lista_arquivos_prontos) == 0:
-        raise ValueError("Nenhuma tag de separação válida foi encontrada. Verifique o Painel de Raio-X acima.")
+        raise ValueError("Nenhuma tag de separação válida foi encontrada. Verifique o Painel de Raio-X.")
         
     return lista_arquivos_prontos
 
 # --- INTERFACE DO USUÁRIO (FRONT-END) ---
 st.title("📄 PDF Smart Splitter")
-st.markdown("**BM Automações** | Separador com Auto-Endireitamento e OCR")
+st.markdown("**BM Automações** | Separador com Auto-Endireitamento e OCR Tesseract")
 st.info("Renomeador e Separador de Documentos: `@@Nome - Tipo - Data$$`")
 
 if "arquivos_processados" not in st.session_state:
@@ -136,13 +131,8 @@ if arquivos:
         espaco_progresso = st.empty()
         
         try:
-            espaco_texto.info("Iniciando motor de OCR... Baixando a inteligência artificial pela primeira vez (pode levar alguns minutos).")
-            
-            # Aqui chamamos a função que, internamente, importará o easyocr e fará o download
-            leitor_ativo = carregar_leitor_ocr()
-            
-            espaco_texto.info("Lendo documentos com resolução de 300 DPI...")
-            st.session_state.arquivos_processados = processar_pdfs(arquivos, espaco_texto, espaco_progresso, leitor_ativo)
+            espaco_texto.info("Lendo documentos com OCR e Endireitamento automático...")
+            st.session_state.arquivos_processados = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
             
             espaco_texto.empty()
             espaco_progresso.empty()
