@@ -1,9 +1,11 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import json
 import io
 import zipfile
+import time
 from collections import defaultdict
 
 # ==============================================================================
@@ -18,7 +20,16 @@ except Exception as e:
     st.error("⚠️ Chave da API do Gemini não encontrada. Configure os 'Secrets' no Streamlit Cloud.")
     st.stop()
 
+# Configuração para forçar JSON e Desligar Filtros de Segurança (Para documentos de RH)
 generation_config = {"response_mime_type": "application/json"}
+
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
 model = genai.GenerativeModel('gemini-1.5-flash', generation_config=generation_config)
 
 # ==============================================================================
@@ -35,7 +46,7 @@ EXPECTED_PAGES = {
 # ==============================================================================
 st.title("🏭 REFRAMINAS AI")
 st.markdown("### Processamento Admissional Inteligente")
-st.markdown("O sistema analisa visualmente os ficheiros e separa-os por colaborador utilizando a Inteligência Artificial do Google Gemini.")
+st.markdown("O sistema analisa visualmente os ficheiros e separa-os por colaborador.")
 
 arquivos_upados = st.file_uploader("Arraste ou selecione os ficheiros PDF", type=["pdf"], accept_multiple_files=True)
 
@@ -48,8 +59,7 @@ if st.button("Processar Documentos", type="primary"):
     log_divergencias = "RELATÓRIO DE DIVERGÊNCIAS E EXCLUSÕES\n=========================================\n\n"
     houve_divergencias = False
 
-    # UTILIZANDO st.status PARA EVITAR ERROS DE REACT DOM
-    with st.status("A iniciar processamento...", expanded=True) as status_box:
+    with st.status("A iniciar processamento visual...", expanded=True) as status_box:
         
         for idx_arq, arquivo in enumerate(arquivos_upados):
             status_box.update(label=f"A preparar: {arquivo.name}...")
@@ -61,7 +71,7 @@ if st.button("Processar Documentos", type="primary"):
             todas_paginas_analisadas = []
 
             for num_pagina in range(total_paginas):
-                status_box.update(label=f"A analisar {arquivo.name}: Página {num_pagina + 1} de {total_paginas} (IA em ação...)")
+                status_box.update(label=f"A analisar {arquivo.name}: Página {num_pagina + 1} de {total_paginas} (Aguarde...)")
                 
                 pagina = doc.load_page(num_pagina)
                 pagina.set_rotation(0) 
@@ -80,8 +90,13 @@ if st.button("Processar Documentos", type="primary"):
                 """
                 
                 imagem_ia = {"mime_type": "image/jpeg", "data": img_bytes}
+                
                 try:
-                    resposta = model.generate_content([prompt, imagem_ia])
+                    # Adicionado os safety_settings aqui
+                    resposta = model.generate_content(
+                        [prompt, imagem_ia],
+                        safety_settings=safety_settings
+                    )
                     dados = json.loads(resposta.text)
                     
                     nome_dono = str(dados.get("nome_colaborador") or "DESCONHECIDO").strip().upper()
@@ -95,9 +110,17 @@ if st.button("Processar Documentos", type="primary"):
                         "texto_tag": dados.get("texto_tag", ""),
                         "usada": False
                     })
+                    
+                    # Pausa de 4.1 segundos para não estourar a quota gratuita (15 RPM)
+                    time.sleep(4.1)
+                    
                 except Exception as e:
-                    log_divergencias += f"[ERRO IA] Ficheiro {arquivo.name} | Página {num_pagina + 1}: Falha ao processar com a IA.\n"
+                    # Agora capturamos e mostramos o erro exato que a API devolver
+                    erro_detalhado = str(e)
+                    log_divergencias += f"[ERRO IA] Ficheiro {arquivo.name} | Página {num_pagina + 1}: {erro_detalhado}\n"
                     houve_divergencias = True
+                    # Se falhar, damos um fôlego maior à API antes da próxima página
+                    time.sleep(5)
 
             paginas_por_colaborador = defaultdict(list)
             for p in todas_paginas_analisadas:
@@ -158,7 +181,6 @@ if st.button("Processar Documentos", type="primary"):
                             
                         arquivos_para_zip[titulo_final] = pdf_final_bytes
 
-        # Atualiza a caixa de status ao finalizar o laço
         status_box.update(label="Processamento visual finalizado!", state="complete", expanded=False)
 
     # ==============================================================================
