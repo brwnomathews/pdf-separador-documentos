@@ -6,6 +6,7 @@ import json
 import io
 import zipfile
 import time
+import concurrent.futures
 from collections import defaultdict
 
 # ==============================================================================
@@ -20,7 +21,7 @@ except Exception as e:
     st.error("⚠️ Chave da API do Gemini não encontrada. Configure os 'Secrets' no Streamlit Cloud.")
     st.stop()
 
-# Configuração para forçar JSON e Desligar Filtros de Segurança (Para documentos de RH)
+# Configuração para forçar JSON e Desligar Filtros de Segurança
 generation_config = {"response_mime_type": "application/json"}
 
 safety_settings = {
@@ -41,11 +42,51 @@ EXPECTED_PAGES = {
     "IT": 1, "LISTA_PRESENCA": 1, "VALE_TRANSPORTE": 1, "PPAE": 1, "DESCONHECIDO": 1
 }
 
+PROMPT_RH = """
+Atuas como assistente de Recursos Humanos especialista em admissões. Analisa a imagem deste documento digitalizado e devolve APENAS um JSON estrito com as seguintes chaves:
+{
+    "nome_colaborador": "O nome completo do funcionário a que o documento pertence. Se não encontrares, devolve null. Se houver uma TAG com 'XXXXX', extrai o nome exato antes do primeiro traço.",
+    "tipo_documento": "Classifica o documento EXATAMENTE num destes tipos: CONTRATO, FICHA_REGISTRO, ORDEM_SERVICO, NI, FICHA_EPI, NR01, NR06, NR12, NR18, NR26, NR33, NR34, NR35, IT, LISTA_PRESENCA, VALE_TRANSPORTE, PPAE, DESCONHECIDO",
+    "is_tag": booleano (true ou false). Coloca true APENAS se encontrares uma zona de fecho delimitada por 'XXXXX'. Caso contrário, é false.,
+    "texto_tag": "O texto exato contido entre os 'XXXXX' (ou null se não for tag)"
+}
+"""
+
+# Função independente para ser processada em paralelo (Threads)
+def processar_pagina_ia(item):
+    num_pagina, img_bytes = item
+    imagem_ia = {"mime_type": "image/jpeg", "data": img_bytes}
+    
+    # Sistema de tentativa em caso de bloqueio por limite de requisições
+    tentativas = 3
+    for tentativa in range(tentativas):
+        try:
+            resposta = model.generate_content([PROMPT_RH, imagem_ia], safety_settings=safety_settings)
+            dados = json.loads(resposta.text)
+            
+            nome_dono = str(dados.get("nome_colaborador") or "DESCONHECIDO").strip().upper()
+            tipo_doc = dados.get("tipo_documento", "DESCONHECIDO")
+            
+            return {
+                "sucesso": True,
+                "index": num_pagina,
+                "nome_dono": nome_dono,
+                "tipo_documento": tipo_doc,
+                "is_tag": dados.get("is_tag", False),
+                "texto_tag": dados.get("texto_tag", ""),
+                "usada": False
+            }
+        except Exception as e:
+            if tentativa < tentativas - 1:
+                time.sleep(2)  # Pausa breve antes de tentar de novo
+            else:
+                return {"sucesso": False, "index": num_pagina, "erro": str(e)}
+
 # ==============================================================================
 # INTERFACE DO UTILIZADOR
 # ==============================================================================
 st.title("🏭 REFRAMINAS AI")
-st.markdown("### Processamento Admissional Inteligente")
+st.markdown("### Processamento Admissional Inteligente (Modo Turbo)")
 st.markdown("O sistema analisa visualmente os ficheiros e separa-os por colaborador.")
 
 arquivos_upados = st.file_uploader("Arraste ou selecione os ficheiros PDF", type=["pdf"], accept_multiple_files=True)
@@ -59,68 +100,44 @@ if st.button("Processar Documentos", type="primary"):
     log_divergencias = "RELATÓRIO DE DIVERGÊNCIAS E EXCLUSÕES\n=========================================\n\n"
     houve_divergencias = False
 
-    with st.status("A iniciar processamento visual...", expanded=True) as status_box:
+    with st.status("A processar documentos...", expanded=True) as status_box:
         
         for idx_arq, arquivo in enumerate(arquivos_upados):
-            status_box.update(label=f"A preparar: {arquivo.name}...")
+            status_box.update(label=f"A preparar imagens de: {arquivo.name}...")
             
             pdf_bytes = arquivo.read()
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             total_paginas = len(doc)
             
-            todas_paginas_analisadas = []
-
+            # PREPARAÇÃO: Transforma todas as páginas em imagens rapidamente na memória
+            imagens_para_analisar = []
             for num_pagina in range(total_paginas):
-                status_box.update(label=f"A analisar {arquivo.name}: Página {num_pagina + 1} de {total_paginas} (Aguarde...)")
-                
                 pagina = doc.load_page(num_pagina)
                 pagina.set_rotation(0) 
-                
-                pix = pagina.get_pixmap(matrix=fitz.Matrix(2, 2))
+                # Resolução reduzida para acelerar upload mantendo qualidade (1.5)
+                pix = pagina.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
                 img_bytes = pix.tobytes("jpeg")
+                imagens_para_analisar.append((num_pagina, img_bytes))
+
+            status_box.update(label=f"A enviar {total_paginas} páginas para a IA simultaneamente...")
+            
+            todas_paginas_analisadas = []
+            
+            # EXECUÇÃO PARALELA: Dispara várias requisições à IA ao mesmo tempo
+            # Max_workers=5 envia 5 páginas ao mesmo tempo. Pode aumentar se a API não bloquear.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                resultados_futuros = [executor.submit(processar_pagina_ia, item) for item in imagens_para_analisar]
                 
-                prompt = """
-                Atuas como assistente de Recursos Humanos especialista em admissões. Analisa a imagem deste documento digitalizado e devolve APENAS um JSON estrito com as seguintes chaves:
-                {
-                    "nome_colaborador": "O nome completo do funcionário a que o documento pertence. Se não encontrares, devolve null. Se houver uma TAG com 'XXXXX', extrai o nome exato antes do primeiro traço.",
-                    "tipo_documento": "Classifica o documento EXATAMENTE num destes tipos: CONTRATO, FICHA_REGISTRO, ORDEM_SERVICO, NI, FICHA_EPI, NR01, NR06, NR12, NR18, NR26, NR33, NR34, NR35, IT, LISTA_PRESENCA, VALE_TRANSPORTE, PPAE, DESCONHECIDO",
-                    "is_tag": booleano (true ou false). Coloca true APENAS se encontrares uma zona de fecho delimitada por 'XXXXX'. Caso contrário, é false.,
-                    "texto_tag": "O texto exato contido entre os 'XXXXX' (ou null se não for tag)"
-                }
-                """
-                
-                imagem_ia = {"mime_type": "image/jpeg", "data": img_bytes}
-                
-                try:
-                    # Adicionado os safety_settings aqui
-                    resposta = model.generate_content(
-                        [prompt, imagem_ia],
-                        safety_settings=safety_settings
-                    )
-                    dados = json.loads(resposta.text)
-                    
-                    nome_dono = str(dados.get("nome_colaborador") or "DESCONHECIDO").strip().upper()
-                    tipo_doc = dados.get("tipo_documento", "DESCONHECIDO")
-                    
-                    todas_paginas_analisadas.append({
-                        "index": num_pagina,
-                        "nome_dono": nome_dono,
-                        "tipo_documento": tipo_doc,
-                        "is_tag": dados.get("is_tag", False),
-                        "texto_tag": dados.get("texto_tag", ""),
-                        "usada": False
-                    })
-                    
-                    # Pausa de 4.1 segundos para não estourar a quota gratuita (15 RPM)
-                    time.sleep(4.1)
-                    
-                except Exception as e:
-                    # Agora capturamos e mostramos o erro exato que a API devolver
-                    erro_detalhado = str(e)
-                    log_divergencias += f"[ERRO IA] Ficheiro {arquivo.name} | Página {num_pagina + 1}: {erro_detalhado}\n"
-                    houve_divergencias = True
-                    # Se falhar, damos um fôlego maior à API antes da próxima página
-                    time.sleep(5)
+                for futuro in concurrent.futures.as_completed(resultados_futuros):
+                    resultado = futuro.result()
+                    if resultado["sucesso"]:
+                        todas_paginas_analisadas.append(resultado)
+                    else:
+                        log_divergencias += f"[ERRO IA] Ficheiro {arquivo.name} | Página {resultado['index'] + 1}: {resultado['erro']}\n"
+                        houve_divergencias = True
+
+            # Ordena as páginas para garantir que a remontagem não baralha a ordem original
+            todas_paginas_analisadas.sort(key=lambda x: x["index"])
 
             paginas_por_colaborador = defaultdict(list)
             for p in todas_paginas_analisadas:
@@ -181,7 +198,7 @@ if st.button("Processar Documentos", type="primary"):
                             
                         arquivos_para_zip[titulo_final] = pdf_final_bytes
 
-        status_box.update(label="Processamento visual finalizado!", state="complete", expanded=False)
+        status_box.update(label="Processamento finalizado à velocidade máxima!", state="complete", expanded=False)
 
     # ==============================================================================
     # CRIAÇÃO DO ZIP EM MEMÓRIA
