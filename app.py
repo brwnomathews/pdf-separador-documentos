@@ -1,231 +1,213 @@
 import streamlit as st
 import fitz  # PyMuPDF
-import cv2
-import numpy as np
-import pypdf
+import google.generativeai as genai
+import json
 import io
-import re
-import pytesseract
 import zipfile
-import datetime
+from collections import defaultdict
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="PDF Smart Splitter", page_icon="📄", layout="centered")
+# ==============================================================================
+# CONFIGURAÇÃO DA PÁGINA E DA IA
+# ==============================================================================
+st.set_page_config(page_title="REFRAMINAS AI", page_icon="📄", layout="centered")
 
-# --- FUNÇÕES DE VISÃO COMPUTACIONAL ---
-def descobrir_angulo(img_np):
-    try:
-        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        osd = pytesseract.image_to_osd(gray)
-        angulo_rotacao = int(re.search(r'(?<=Rotate: )\d+', osd).group(0))
-        return angulo_rotacao
-    except Exception:
-        return 0
+# Tenta carregar a chave da API das variáveis de ambiente (Secrets do Streamlit)
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=API_KEY)
+except Exception as e:
+    st.error("⚠️ Chave da API do Gemini não encontrada. Configure os 'Secrets' no Streamlit Cloud.")
+    st.stop()
 
-def endireitar_imagem(image_np):
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-    gray = cv2.bitwise_not(gray)
-    coords = np.column_stack(np.where(gray > 0))
-    if len(coords) == 0:
-        return image_np
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-    (h, w) = image_np.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv2.warpAffine(image_np, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-    return rotated
+# Configuração do modelo para forçar a resposta em JSON
+generation_config = {"response_mime_type": "application/json"}
+model = genai.GenerativeModel('gemini-1.5-flash', generation_config=generation_config)
 
-# --- FUNÇÃO PRINCIPAL DE PROCESSAMENTO ---
-def processar_pdfs(arquivos_upados, placeholder_texto, placeholder_progresso):
-    zip_buffer = io.BytesIO()
-    logs = []
-    arquivos_gerados = 0
-    erros_ocorridos = False
-    
-    data_hora_inicio = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logs.append(f"RELATÓRIO DE PROCESSAMENTO - {data_hora_inicio}\n")
-    logs.append("="*60)
-    
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for arquivo in arquivos_upados:
-            placeholder_texto.markdown(f"⏳ Processando arquivo: **{arquivo.name}**")
-            logs.append(f"\n📄 Lendo documento de origem: {arquivo.name}")
+# ==============================================================================
+# REGRAS DE NEGÓCIO (Páginas Esperadas)
+# ==============================================================================
+EXPECTED_PAGES = {
+    "CONTRATO": 2, "FICHA_REGISTRO": 2, "ORDEM_SERVICO": 3, "NI": 2, "FICHA_EPI": 2,
+    "NR01": 2, "NR06": 2, "NR12": 2, "NR18": 2, "NR26": 2, "NR33": 2, "NR34": 2, "NR35": 2,
+    "IT": 1, "LISTA_PRESENCA": 1, "VALE_TRANSPORTE": 1, "PPAE": 1, "DESCONHECIDO": 1
+}
+
+# ==============================================================================
+# INTERFACE DO UTILIZADOR
+# ==============================================================================
+st.title("🏭 REFRAMINAS AI")
+st.markdown("### Processamento Admissional Inteligente")
+st.markdown("O sistema analisa visualmente os ficheiros e separa-os por colaborador utilizando a Inteligência Artificial do Google Gemini.")
+
+arquivos_upados = st.file_uploader("Arraste ou selecione os ficheiros PDF", type=["pdf"], accept_multiple_files=True)
+
+if st.button("Processar Documentos", type="primary"):
+    if not arquivos_upados:
+        st.warning("Por favor, selecione pelo menos um ficheiro PDF.")
+        st.stop()
+
+    # Variáveis globais para armazenar os PDFs gerados e os logs de erro
+    arquivos_para_zip = {}
+    log_divergencias = "RELATÓRIO DE DIVERGÊNCIAS E EXCLUSÕES\n=========================================\n\n"
+    houve_divergencias = False
+
+    barra_progresso = st.progress(0)
+    status_texto = st.empty()
+
+    for idx_arq, arquivo in enumerate(arquivos_upados):
+        status_texto.text(f"A ler o ficheiro: {arquivo.name}...")
+        
+        # 1. Carregar o PDF em memória utilizando o PyMuPDF
+        pdf_bytes = arquivo.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        total_paginas = len(doc)
+        
+        todas_paginas_analisadas = []
+
+        # 2. Análise Visual (IA) de cada página individual
+        for num_pagina in range(total_paginas):
+            status_texto.text(f"A analisar {arquivo.name}: Página {num_pagina + 1} de {total_paginas} (IA em ação...)")
             
+            pagina = doc.load_page(num_pagina)
+            # Força a rotação visual a zeros antes de capturar a imagem
+            pagina.set_rotation(0) 
+            
+            # Converte a página para uma imagem de alta qualidade
+            pix = pagina.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_bytes = pix.tobytes("jpeg")
+            
+            prompt = """
+            Atuas como assistente de Recursos Humanos especialista em admissões. Analisa a imagem deste documento digitalizado e devolve APENAS um JSON estrito com as seguintes chaves:
+            {
+                "nome_colaborador": "O nome completo do funcionário a que o documento pertence. Se não encontrares, devolve null. Se houver uma TAG com 'XXXXX', extrai o nome exato antes do primeiro traço.",
+                "tipo_documento": "Classifica o documento EXATAMENTE num destes tipos: CONTRATO, FICHA_REGISTRO, ORDEM_SERVICO, NI, FICHA_EPI, NR01, NR06, NR12, NR18, NR26, NR33, NR34, NR35, IT, LISTA_PRESENCA, VALE_TRANSPORTE, PPAE, DESCONHECIDO",
+                "is_tag": booleano (true ou false). Coloca true APENAS se encontrares uma zona de fecho delimitada por 'XXXXX'. Caso contrário, é false.,
+                "texto_tag": "O texto exato contido entre os 'XXXXX' (ou null se não for tag)"
+            }
+            """
+            
+            # Envia a imagem para a IA analisar
+            imagem_ia = {"mime_type": "image/jpeg", "data": img_bytes}
             try:
-                arquivo_bytes = arquivo.read()
-                doc_imagens = fitz.open(stream=arquivo_bytes, filetype="pdf")
-                pdf_original = pypdf.PdfReader(io.BytesIO(arquivo_bytes))
+                resposta = model.generate_content([prompt, imagem_ia])
+                dados = json.loads(resposta.text)
                 
-                paginas_buffer = []
-                barra = placeholder_progresso.progress(0)
-                total_paginas = len(pdf_original.pages)
-                tags_encontradas_no_arquivo = 0
+                # Normaliza o nome do colaborador
+                nome_dono = str(dados.get("nome_colaborador") or "DESCONHECIDO").strip().upper()
+                tipo_doc = dados.get("tipo_documento", "DESCONHECIDO")
                 
-                for i in range(total_paginas):
-                    barra.progress((i + 1) / total_paginas)
-                    paginas_buffer.append(i)
+                todas_paginas_analisadas.append({
+                    "index": num_pagina,
+                    "nome_dono": nome_dono,
+                    "tipo_documento": tipo_doc,
+                    "is_tag": dados.get("is_tag", False),
+                    "texto_tag": dados.get("texto_tag", ""),
+                    "usada": False
+                })
+            except Exception as e:
+                log_divergencias += f"[ERRO IA] Ficheiro {arquivo.name} | Página {num_pagina + 1}: Falha ao processar com a IA.\n"
+                houve_divergencias = True
+
+        # 3. Agrupar as páginas por colaborador
+        paginas_por_colaborador = defaultdict(list)
+        for p in todas_paginas_analisadas:
+            paginas_por_colaborador[p["nome_dono"]].append(p)
+
+        # 4. Aplicar a lógica de montagem dos Documentos
+        status_texto.text(f"A montar ficheiros e a validar regras para {arquivo.name}...")
+        
+        for nome, paginas in paginas_por_colaborador.items():
+            if nome == "DESCONHECIDO":
+                continue # Ignora páginas onde a IA não conseguiu determinar o dono
+
+            # Extrai apenas as páginas classificadas como TAG
+            paginas_tag = [p for p in paginas if p["is_tag"]]
+            
+            # Ordenação de Prioridade (1 Página primeiro)
+            paginas_tag.sort(key=lambda p: EXPECTED_PAGES.get(p["tipo_documento"], 1))
+
+            for p_tag in paginas_tag:
+                tipo_doc = p_tag["tipo_documento"]
+                esperado = EXPECTED_PAGES.get(tipo_doc, 1)
+                
+                if p_tag["texto_tag"]:
+                    titulo_base = str(p_tag["texto_tag"]).strip().upper()
+                else:
+                    titulo_base = f"{nome} - {tipo_doc}"
+
+                # Filtra páginas normais (não TAG) e não usadas, do mesmo tipo e do mesmo colaborador
+                candidatas = [p for p in paginas if not p["is_tag"] and not p["usada"] and p["tipo_documento"] == tipo_doc]
+
+                paginas_do_doc = []
+                
+                if esperado == 1:
+                    paginas_do_doc = [p_tag]
+                    p_tag["usada"] = True
+                else:
+                    necessarias = esperado - 1
+                    if len(candidatas) >= necessarias:
+                        # Seleciona a quantidade necessária e adiciona a TAG no final
+                        paginas_selecionadas = candidatas[:necessarias]
+                        paginas_do_doc = paginas_selecionadas + [p_tag]
+                        
+                        # Marca como usadas
+                        for ps in paginas_selecionadas:
+                            ps["usada"] = True
+                        p_tag["usada"] = True
+                    else:
+                        # Divergência! Faltam páginas
+                        msg_erro = f"[EXCLUÍDO] Ficheiro: {arquivo.name} | Colaborador: {nome} | Documento: {titulo_base} | Motivo: IA encontrou apenas {len(candidatas) + 1} de {esperado} páginas exigidas."
+                        log_divergencias += msg_erro + "\n"
+                        houve_divergencias = True
+                        continue
+
+                # ==========================================
+                # RECORTAR E GERAR O NOVO PDF
+                # ==========================================
+                if paginas_do_doc:
+                    novo_pdf = fitz.open()
+                    for p_obj in paginas_do_doc:
+                        # Extrai a página do documento original em memória
+                        novo_pdf.insert_pdf(doc, from_page=p_obj["index"], to_page=p_obj["index"])
                     
-                    try:
-                        pagina = doc_imagens.load_page(i)
-                        pix = pagina.get_pixmap(dpi=300) 
-                        img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-                        
-                        if pix.n == 4:
-                            img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2RGB)
-                        elif pix.n == 1:
-                            img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
-                        
-                        angulo = descobrir_angulo(img_np)
-                        if angulo != 0:
-                            pdf_original.pages[i].rotate(angulo)
-                        
-                        if angulo == 90:
-                            img_np = cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE)
-                        elif angulo == 180:
-                            img_np = cv2.rotate(img_np, cv2.ROTATE_180)
-                        elif angulo == 270:
-                            img_np = cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                            
-                        img_endireitada = endireitar_imagem(img_np)
-                        texto_completo = pytesseract.image_to_string(img_endireitada, lang='por')
-                        texto_completo_linha = texto_completo.replace('\n', ' ') 
-                        
-                        # NOVO REGEX DA TAG: XXXXX ... XXXXX
-                        regex_prioridade = r'XXXXX\s*(.{1,100}?)\s*XXXXX'
-                        match = re.search(regex_prioridade, texto_completo_linha)
-                        
-                        if match:
-                            nome_extraido = match.group(1)
-                            if nome_extraido:
-                                nome_sugerido = re.sub(r'\s+', ' ', nome_extraido).strip()
-                                nome_sugerido = re.sub(r'[\\/:*?"<>|]', '', nome_sugerido)
-                                nome_sugerido = nome_sugerido[:100] 
-                                nome_final = f"{nome_sugerido}.pdf"
-                                
-                                # --- INÍCIO DA VALIDAÇÃO DE PÁGINAS ---
-                                qtd_paginas_reais = len(paginas_buffer)
-                                status_suspeito = False
-                                
-                                # Busca "Página 3" ou "Pagina 3" (ignora maiúsculas/minúsculas e acentos)
-                                regex_pagina = r'(?i)P[áa]gina\s*(\d+)'
-                                match_pag = re.search(regex_pagina, texto_completo)
-                                
-                                if match_pag:
-                                    num_pagina_lido = int(match_pag.group(1))
-                                    if num_pagina_lido == qtd_paginas_reais:
-                                        msg_validacao = f"Validação OK ({qtd_paginas_reais} págs)."
-                                    else:
-                                        msg_validacao = f"ALERTA: Tag lida na 'Página {num_pagina_lido}', mas o bloco tem {qtd_paginas_reais} folhas fisicas!"
-                                        status_suspeito = True
-                                else:
-                                    msg_validacao = f"Aviso: Não achou rodapé para validar. Salvo com {qtd_paginas_reais} págs."
-                                # --- FIM DA VALIDAÇÃO ---
-                                
-                                pdf_writer = pypdf.PdfWriter()
-                                for p_num in paginas_buffer:
-                                    pdf_writer.add_page(pdf_original.pages[p_num])
-                                
-                                pdf_out_buffer = io.BytesIO()
-                                pdf_writer.write(pdf_out_buffer)
-                                
-                                zip_file.writestr(nome_final, pdf_out_buffer.getvalue())
-                                
-                                # Regista no Log com base na validação
-                                if status_suspeito:
-                                    logs.append(f"   -> ⚠️ [SUSPEITO] {nome_final} | {msg_validacao}")
-                                    erros_ocorridos = True # Isso fará a tela ficar laranja no final
-                                else:
-                                    logs.append(f"   -> ✅ [SUCESSO] {nome_final} | {msg_validacao}")
-                                    
-                                arquivos_gerados += 1
-                                tags_encontradas_no_arquivo += 1
-                                paginas_buffer = []
-                                
-                    except Exception as e_pagina:
-                        erros_ocorridos = True
-                        logs.append(f"   -> ❌ [ERRO] Falha ao ler a pág {i+1}: {str(e_pagina)}")
-                
-                doc_imagens.close()
-                
-                if tags_encontradas_no_arquivo == 0:
-                    erros_ocorridos = True
-                    logs.append(f"   -> ⚠️ [AVISO] Nenhuma tag (XXXXX) encontrada. O documento não foi separado.")
+                    pdf_final_bytes = novo_pdf.write()
                     
-            except Exception as e_arquivo:
-                erros_ocorridos = True
-                logs.append(f"   -> ❌ [ERRO CRÍTICO] O arquivo {arquivo.name} falhou completamente: {str(e_arquivo)}")
+                    titulo_final = f"{titulo_base}.pdf"
+                    contador = 1
+                    while titulo_final in arquivos_para_zip:
+                        titulo_final = f"{titulo_base}({contador}).pdf"
+                        contador += 1
+                        
+                    arquivos_para_zip[titulo_final] = pdf_final_bytes
+
+        # Atualiza a barra de progresso
+        barra_progresso.progress((idx_arq + 1) / len(arquivos_upados))
+
+    status_texto.text("A gerar o ficheiro ZIP final...")
+
+    # ==============================================================================
+    # CRIAÇÃO DO ZIP EM MEMÓRIA
+    # ==============================================================================
+    if arquivos_para_zip or houve_divergencias:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+            for nome_arquivo, data in arquivos_para_zip.items():
+                zip_file.writestr(nome_arquivo, data)
+                
+            if houve_divergencias:
+                zip_file.writestr("log_divergencias.txt", log_divergencias.encode("utf-8"))
         
-        logs.append("\n" + "="*60)
-        logs.append(f"Total de arquivos gerados com sucesso: {arquivos_gerados}")
-        if erros_ocorridos:
-            logs.append("STATUS FINAL: Concluído com SUSPEITAS/ALERTAS. Revise os itens marcados com ⚠️ acima.")
-        else:
-            logs.append("STATUS FINAL: 100% Concluído com Sucesso e Validado!")
+        # Oferece o botão de Download no Streamlit
+        st.success("Processamento concluído com sucesso!")
+        if houve_divergencias:
+            st.warning("Atenção: Houve divergências. Consulte o 'log_divergencias.txt' dentro do ZIP.")
             
-        zip_file.writestr("log.txt", "\n".join(logs))
-        
-    return zip_buffer.getvalue(), erros_ocorridos, arquivos_gerados
-
-# --- INTERFACE DO USUÁRIO (FRONT-END) ---
-st.title("📄 PDF Smart Splitter")
-st.markdown("**BM Automações** | Separador OCR Inteligente c/ Auditoria de Páginas")
-st.info("Renomeador e Separador de Documentos: `XXXXX Nome - Tipo - Data XXXXX`")
-
-if "zip_pronto" not in st.session_state:
-    st.session_state.zip_pronto = None
-    st.session_state.teve_erro = False
-    st.session_state.qtd_arquivos = 0
-
-arquivos = st.file_uploader("Arraste seus PDFs aqui", type=["pdf"], accept_multiple_files=True)
-
-if arquivos:
-    if st.button("PROCESSAR ARQUIVOS", type="primary"):
-        espaco_texto = st.empty()
-        espaco_progresso = st.empty()
-        
-        try:
-            espaco_texto.info("Lendo documentos e validando integridade das páginas...")
-            
-            zip_bytes, teve_erro, qtd_arquivos = processar_pdfs(arquivos, espaco_texto, espaco_progresso)
-            
-            st.session_state.zip_pronto = zip_bytes
-            st.session_state.teve_erro = teve_erro
-            st.session_state.qtd_arquivos = qtd_arquivos
-            
-            espaco_texto.empty()
-            espaco_progresso.empty()
-            
-        except Exception as e:
-            espaco_texto.empty()
-            espaco_progresso.empty()
-            st.error(f"Erro fatal não tratado: {str(e)}")
-
-# --- FEEDBACK VISUAL ---
-if st.session_state.zip_pronto is not None:
-    st.markdown("### 📦 Seu arquivo está pronto")
-    
-    if st.session_state.qtd_arquivos == 0:
-        st.error("❌ Nenhuma tag XXXXX lida. Baixe o ZIP para ler o log.txt.")
-    elif st.session_state.teve_erro:
-        st.warning("⚠️ Atenção: Há documentos SUSPEITOS ou faltantes. Baixe e leia o 'log.txt'!")
+        st.download_button(
+            label="📦 Descarregar Ficheiros Separados (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="Processos_REFRAMINAS.zip",
+            mime="application/zip",
+            type="primary"
+        )
     else:
-        st.success("✅ Processamento 100% íntegro. Todas as numerações bateram!")
-        
-    data_atual = datetime.datetime.now().strftime("%Y-%m-%d")
-    nome_zip = f"Lote_Auditoria_{data_atual}.zip"
-    
-    st.download_button(
-        label="⬇️ BAIXAR ARQUIVOS E LOG",
-        data=st.session_state.zip_pronto,
-        file_name=nome_zip,
-        mime="application/zip"
-    )
-    
-    st.markdown("---")
-    if st.button("🧹 Limpar e Começar de Novo"):
-        st.session_state.zip_pronto = None
-        st.rerun()
+        st.error("Nenhum ficheiro pôde ser gerado. Verifique a qualidade dos PDFs.")
