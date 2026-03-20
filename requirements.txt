@@ -1,3 +1,4 @@
 streamlit
 PyMuPDF
-google-generativeai
+pytesseract
+Pillow
