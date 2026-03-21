@@ -10,16 +10,16 @@ from collections import defaultdict
 st.set_page_config(page_title="REFRAMINAS Automático", page_icon="⚙️", layout="centered")
 
 # ==============================================================================
-# FUNÇÃO DE EXTRAÇÃO DA TAG (Dupla Verificação + Rotação 360º)
+# FUNÇÃO DE EXTRAÇÃO DA TAG (Limpeza de Quebras de Linha + Roleta 360º)
 # ==============================================================================
 def extrair_tag_pagina(pagina_pdf):
-    padrao = r'XXXXX\s*(.*?\.pdf)\s*XXXXX.*?P[aá]gina\s*(\d+)\s*de\s*(\d+)'
+    # Padrão blindado: Aceita XXXXX ou X X X X X, ignora quebras de linha e acha os números
+    padrao = r'X[\sX]{3,}X\s*(.*?)\s*X[\sX]{3,}X.*?P[aá]gina\s*(\d+)\s*de\s*(\d+)'
     
-    # 1ª TENTATIVA: Extração de texto nativo (Rápido)
-    texto = pagina_pdf.get_text()
-    match = re.search(padrao, texto, re.IGNORECASE | re.DOTALL)
+    # 1ª TENTATIVA: Texto Nativo
+    # Transforma todo o texto da página numa linha única (remove quebras de linha invisíveis)
+    texto_nativo = re.sub(r'\s+', ' ', pagina_pdf.get_text())
     
-    # Função interna para formatar o sucesso e evitar código repetido
     def formatar_sucesso(m):
         titulo_arquivo = m.group(1).strip()
         if not titulo_arquivo.lower().endswith('.pdf'):
@@ -31,30 +31,27 @@ def extrair_tag_pagina(pagina_pdf):
             "pag_total": int(m.group(3))
         }
 
+    match = re.search(padrao, texto_nativo, re.IGNORECASE)
     if match:
         return formatar_sucesso(match)
-    
-    # 2ª TENTATIVA: OCR com Roleta de Rotação (Scan, Fotos Tortas, etc)
+        
+    # 2ª TENTATIVA: OCR com Roleta 360 Graus
     pix = pagina_pdf.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
     img_original = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    # Tenta ler a imagem na posição original e rotacionada (0, 90, 180, 270 graus)
     angulos = [0, 90, 180, 270]
     for angulo in angulos:
-        if angulo == 0:
-            img = img_original
-        else:
-            # Gira a imagem (expand=True garante que as bordas não são cortadas)
-            img = img_original.rotate(angulo, expand=True)
-            
+        img = img_original if angulo == 0 else img_original.rotate(angulo, expand=True)
         texto_ocr = pytesseract.image_to_string(img, lang='por')
-        match = re.search(padrao, texto_ocr, re.IGNORECASE | re.DOTALL)
+        texto_ocr_limpo = re.sub(r'\s+', ' ', texto_ocr)
         
+        match = re.search(padrao, texto_ocr_limpo, re.IGNORECASE)
         if match:
             return formatar_sucesso(match)
-    
-    # Se rodou 360º e não achou nada, a página realmente não tem TAG
-    return {"sucesso": False}
+            
+    # Se falhar totalmente, devolve os primeiros 100 caracteres que conseguiu ler para depuração
+    return {"sucesso": False, "debug": texto_nativo[:100]}
+
 # ==============================================================================
 # INTERFACE DO UTILIZADOR
 # ==============================================================================
@@ -82,14 +79,13 @@ if st.button("Processar Documentos", type="primary"):
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             total_paginas = len(doc)
             
-            # Dicionário: { "Titulo_do_PDF.pdf": {"total_esperado": Z, "paginas": { Y: index_no_pdf_original }} }
             documentos_em_construcao = defaultdict(lambda: {"total_esperado": 0, "paginas": {}})
 
-            # 1. VARREDURA DAS PÁGINAS
             for num_pagina in range(total_paginas):
-                status_box.update(label=f"A procurar TAG na página {num_pagina + 1}/{total_paginas} (Verificação Dupla)...")
+                status_box.update(label=f"A ler página {num_pagina + 1}/{total_paginas} (Verificação Dupla)...")
                 pagina = doc.load_page(num_pagina)
-                pagina.set_rotation(0)
+                
+                # REMOVIDO: pagina.set_rotation(0) -> Agora o script respeita a rotação nativa do PDF!
                 
                 dados = extrair_tag_pagina(pagina)
                 
@@ -98,21 +94,19 @@ if st.button("Processar Documentos", type="primary"):
                     documentos_em_construcao[titulo]["total_esperado"] = dados["pag_total"]
                     documentos_em_construcao[titulo]["paginas"][dados["pag_atual"]] = num_pagina
                 else:
-                    log_divergencias += f"[AVISO] Ficheiro original {arquivo.name} | Página {num_pagina + 1}: Nenhuma TAG válida identificada, mesmo após OCR. Página ignorada.\n"
+                    texto_debug = dados.get('debug', '').strip()
+                    log_divergencias += f"[AVISO] Ficheiro {arquivo.name} | Página {num_pagina + 1}: Nenhuma TAG válida. O que o script leu: '{texto_debug}'...\n"
                     houve_divergencias = True
 
             status_box.update(label=f"A validar e a fechar documentos de {arquivo.name}...")
 
-            # 2. MONTAGEM DOS PDFs FINAIS
             for titulo_doc, info in documentos_em_construcao.items():
                 total_esperado = info["total_esperado"]
                 paginas_encontradas = info["paginas"]
                 
-                # Verifica se encontrou todas as páginas de 1 até Z
                 if len(paginas_encontradas) == total_esperado:
                     novo_pdf = fitz.open()
                     
-                    # Insere as páginas na ordem exata (1 a Z)
                     for ordem in range(1, total_esperado + 1):
                         if ordem in paginas_encontradas:
                             index_original = paginas_encontradas[ordem]
@@ -135,7 +129,6 @@ if st.button("Processar Documentos", type="primary"):
 
         status_box.update(label="Processamento finalizado com sucesso!", state="complete", expanded=False)
 
-    # 3. GERAÇÃO DO ZIP
     if arquivos_para_zip or houve_divergencias:
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
@@ -146,7 +139,7 @@ if st.button("Processar Documentos", type="primary"):
         
         st.success("Tudo pronto! Ficheiros extraídos rigorosamente.")
         if houve_divergencias:
-            st.warning("Atenção: Houve divergências (Páginas sem TAG ou documentos incompletos).")
+            st.warning("Atenção: Houve divergências. Consulte o relatório dentro do ZIP para ver o que o script leu de errado nas páginas.")
             
         st.download_button(
             label="📦 Descarregar Documentos Montados (ZIP)",
@@ -156,4 +149,4 @@ if st.button("Processar Documentos", type="primary"):
             type="primary"
         )
     else:
-        st.error("Nenhum ficheiro pôde ser gerado. Verifique se as TAGs estão legíveis.")
+        st.error("Nenhum ficheiro pôde ser gerado. Verifique o relatório de divergências (se aplicável).")
