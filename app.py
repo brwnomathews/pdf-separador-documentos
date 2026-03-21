@@ -10,25 +10,32 @@ from collections import defaultdict
 st.set_page_config(page_title="REFRAMINAS Automático", page_icon="⚙️", layout="centered")
 
 # ==============================================================================
-# FUNÇÃO DE EXTRAÇÃO DA TAG (Híbrida: Texto Nativo ou OCR)
+# FUNÇÃO DE EXTRAÇÃO DA TAG (Dupla Verificação: Nativo -> OCR)
 # ==============================================================================
 def extrair_tag_pagina(pagina_pdf):
-    # Tenta extração de texto nativo primeiro (Super Rápido)
-    texto = pagina_pdf.get_text()
-    
-    # Se não houver texto nativo (é uma imagem/scan), aplica OCR
-    if len(texto.strip()) < 10:
-        pix = pagina_pdf.get_pixmap(matrix=fitz.Matrix(2, 2))
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        texto = pytesseract.image_to_string(img, lang='por')
-    
     # RegEx para capturar: XXXXX [NOME DO ARQUIVO.pdf] XXXXX Página [Y] de [Z]
     padrao = r'XXXXX\s*(.*?\.pdf)\s*XXXXX.*?P[aá]gina\s*(\d+)\s*de\s*(\d+)'
+    
+    # 1ª TENTATIVA: Extração de texto nativo (Rápido)
+    texto = pagina_pdf.get_text()
     match = re.search(padrao, texto, re.IGNORECASE | re.DOTALL)
     
+    # 2ª TENTATIVA: Se não encontrou a TAG no texto, FORÇA O OCR
+    if not match:
+        # Aumenta a resolução (2.5) para garantir que o Tesseract lê perfeitamente
+        pix = pagina_pdf.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        
+        # Converte a imagem da página em texto
+        texto_ocr = pytesseract.image_to_string(img, lang='por')
+        
+        # Procura a TAG novamente, agora no texto que a visão computacional extraiu
+        match = re.search(padrao, texto_ocr, re.IGNORECASE | re.DOTALL)
+    
+    # Se encontrou a TAG (seja na 1ª ou na 2ª tentativa), devolve os dados
     if match:
         titulo_arquivo = match.group(1).strip()
-        # Se o OCR comer o ".pdf", garantimos que ele existe
+        # Se o OCR comer o ".pdf" por falha de leitura, garantimos que ele existe
         if not titulo_arquivo.lower().endswith('.pdf'):
             titulo_arquivo += '.pdf'
             
@@ -38,6 +45,7 @@ def extrair_tag_pagina(pagina_pdf):
             "pag_atual": int(match.group(2)),
             "pag_total": int(match.group(3))
         }
+    
     return {"sucesso": False}
 
 # ==============================================================================
@@ -61,7 +69,7 @@ if st.button("Processar Documentos", type="primary"):
     with st.status("A iniciar processamento e montagem...", expanded=True) as status_box:
         
         for idx_arq, arquivo in enumerate(arquivos_upados):
-            status_box.update(label=f"A ler: {arquivo.name}...")
+            status_box.update(label=f"A preparar: {arquivo.name}...")
             
             pdf_bytes = arquivo.read()
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -72,7 +80,7 @@ if st.button("Processar Documentos", type="primary"):
 
             # 1. VARREDURA DAS PÁGINAS
             for num_pagina in range(total_paginas):
-                status_box.update(label=f"A procurar TAG na página {num_pagina + 1}/{total_paginas}...")
+                status_box.update(label=f"A procurar TAG na página {num_pagina + 1}/{total_paginas} (Verificação Dupla)...")
                 pagina = doc.load_page(num_pagina)
                 pagina.set_rotation(0)
                 
@@ -81,10 +89,9 @@ if st.button("Processar Documentos", type="primary"):
                 if dados["sucesso"]:
                     titulo = dados["titulo"]
                     documentos_em_construcao[titulo]["total_esperado"] = dados["pag_total"]
-                    # Guarda o index da página mapeado à sua ordem correta (pag_atual)
                     documentos_em_construcao[titulo]["paginas"][dados["pag_atual"]] = num_pagina
                 else:
-                    log_divergencias += f"[AVISO] Ficheiro original {arquivo.name} | Página {num_pagina + 1}: Nenhuma TAG válida identificada. Página ignorada.\n"
+                    log_divergencias += f"[AVISO] Ficheiro original {arquivo.name} | Página {num_pagina + 1}: Nenhuma TAG válida identificada, mesmo após OCR. Página ignorada.\n"
                     houve_divergencias = True
 
             status_box.update(label=f"A validar e a fechar documentos de {arquivo.name}...")
@@ -106,7 +113,6 @@ if st.button("Processar Documentos", type="primary"):
                     
                     pdf_final_bytes = novo_pdf.write()
                     
-                    # Evitar sobrescrever ficheiros com o mesmo nome exato
                     titulo_final = titulo_doc
                     contador = 1
                     while titulo_final in arquivos_para_zip:
@@ -115,13 +121,12 @@ if st.button("Processar Documentos", type="primary"):
                         
                     arquivos_para_zip[titulo_final] = pdf_final_bytes
                 else:
-                    # Faltaram páginas para fechar este documento
                     paginas_presentes = list(paginas_encontradas.keys())
                     msg_erro = f"[FALHA DE MONTAGEM] Documento: {titulo_doc} | Era esperado {total_esperado} páginas, mas apenas as páginas {paginas_presentes} foram encontradas."
                     log_divergencias += msg_erro + "\n"
                     houve_divergencias = True
 
-        status_box.update(label="Processamento finalizado!", state="complete", expanded=False)
+        status_box.update(label="Processamento finalizado com sucesso!", state="complete", expanded=False)
 
     # 3. GERAÇÃO DO ZIP
     if arquivos_para_zip or houve_divergencias:
@@ -132,7 +137,7 @@ if st.button("Processar Documentos", type="primary"):
             if houve_divergencias:
                 zip_file.writestr("log_divergencias.txt", log_divergencias.encode("utf-8"))
         
-        st.success("Tudo pronto! Ficheiros extraídos rigorosamente pela regra da TAG.")
+        st.success("Tudo pronto! Ficheiros extraídos rigorosamente.")
         if houve_divergencias:
             st.warning("Atenção: Houve divergências (Páginas sem TAG ou documentos incompletos).")
             
