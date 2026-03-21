@@ -10,48 +10,53 @@ from collections import defaultdict
 st.set_page_config(page_title="REFRAMINAS Automático", page_icon="⚙️", layout="centered")
 
 # ==============================================================================
-# FUNÇÃO DE EXTRAÇÃO DA TAG (Limpeza de Quebras de Linha + Roleta 360º)
+# FUNÇÃO DE EXTRAÇÃO DA TAG (RegEx Flexível + Fundo Branco + Mega Debug)
 # ==============================================================================
 def extrair_tag_pagina(pagina_pdf):
-    # Padrão blindado: Aceita XXXXX ou X X X X X, ignora quebras de linha e acha os números
-    padrao = r'X[\sX]{3,}X\s*(.*?)\s*X[\sX]{3,}X.*?P[aá]gina\s*(\d+)\s*de\s*(\d+)'
+    # Padrão Super Flexível:
+    # 1. Encontra XXXXX (mesmo com espaços no meio)
+    # 2. Captura o Título (com ou sem .pdf)
+    # 3. Encontra XXXXX
+    # 4. Encontra "Página Y de Z", "Pag Y de Z", "Pagina Y / Z", etc.
+    padrao = r'X[\sX]{3,}X\s*(.*?)\s*X[\sX]{3,}X.*?P[aá]g(?:ina)?\s*(\d+)\s*(?:de|/)\s*(\d+)'
     
-    # 1ª TENTATIVA: Texto Nativo
-    # Transforma todo o texto da página numa linha única (remove quebras de linha invisíveis)
-    texto_nativo = re.sub(r'\s+', ' ', pagina_pdf.get_text())
+    # FORÇA a conversão da página em imagem de alta qualidade
+    matriz = fitz.Matrix(3, 3)
+    pix = pagina_pdf.get_pixmap(matrix=matriz, alpha=False) # alpha=False força fundo branco puro
     
-    def formatar_sucesso(m):
-        titulo_arquivo = m.group(1).strip()
-        if not titulo_arquivo.lower().endswith('.pdf'):
-            titulo_arquivo += '.pdf'
-        return {
-            "sucesso": True,
-            "titulo": titulo_arquivo,
-            "pag_atual": int(m.group(2)),
-            "pag_total": int(m.group(3))
-        }
-
-    match = re.search(padrao, texto_nativo, re.IGNORECASE)
-    if match:
-        return formatar_sucesso(match)
-        
-    # 2ª TENTATIVA: OCR com Roleta 360 Graus
-    pix = pagina_pdf.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
     img_original = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    textos_lidos = []
     
+    # Tenta ler a imagem na posição original e rotacionada (Roleta 360º)
     angulos = [0, 90, 180, 270]
     for angulo in angulos:
-        img = img_original if angulo == 0 else img_original.rotate(angulo, expand=True)
+        img = img_original if angulo == 0 else img_original.rotate(angulo, expand=True, fillcolor="white")
+        
         texto_ocr = pytesseract.image_to_string(img, lang='por')
-        texto_ocr_limpo = re.sub(r'\s+', ' ', texto_ocr)
+        texto_ocr_limpo = re.sub(r'\s+', ' ', texto_ocr) # Transforma tudo numa linha única
+        
+        # Guarda uma amostra do que o OCR leu nesta posição para o log de erros
+        amostra = texto_ocr_limpo[:100].strip()
+        if amostra:
+            textos_lidos.append(f"[{angulo}º: {amostra}...]")
         
         match = re.search(padrao, texto_ocr_limpo, re.IGNORECASE)
         if match:
-            return formatar_sucesso(match)
+            titulo_arquivo = match.group(1).strip()
+            # Garante que termina em .pdf para a montagem do ZIP
+            if not titulo_arquivo.lower().endswith('.pdf'):
+                titulo_arquivo += '.pdf'
+                
+            return {
+                "sucesso": True,
+                "titulo": titulo_arquivo,
+                "pag_atual": int(match.group(2)),
+                "pag_total": int(match.group(3))
+            }
             
-    # Se falhar totalmente, devolve os primeiros 100 caracteres que conseguiu ler para depuração
-    return {"sucesso": False, "debug": texto_nativo[:100]}
-
+    # Se falhou nas 4 posições, devolve o Mega Debug
+    debug_string = " | ".join(textos_lidos) if textos_lidos else "OCR NÃO DETETOU NENHUMA LETRA"
+    return {"sucesso": False, "debug": debug_string}
 # ==============================================================================
 # INTERFACE DO UTILIZADOR
 # ==============================================================================
