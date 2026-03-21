@@ -10,44 +10,51 @@ from collections import defaultdict
 st.set_page_config(page_title="REFRAMINAS Automático", page_icon="⚙️", layout="centered")
 
 # ==============================================================================
-# FUNÇÃO DE EXTRAÇÃO DA TAG (Dupla Verificação: Nativo -> OCR)
+# FUNÇÃO DE EXTRAÇÃO DA TAG (Dupla Verificação + Rotação 360º)
 # ==============================================================================
 def extrair_tag_pagina(pagina_pdf):
-    # RegEx para capturar: XXXXX [NOME DO ARQUIVO.pdf] XXXXX Página [Y] de [Z]
     padrao = r'XXXXX\s*(.*?\.pdf)\s*XXXXX.*?P[aá]gina\s*(\d+)\s*de\s*(\d+)'
     
     # 1ª TENTATIVA: Extração de texto nativo (Rápido)
     texto = pagina_pdf.get_text()
     match = re.search(padrao, texto, re.IGNORECASE | re.DOTALL)
     
-    # 2ª TENTATIVA: Se não encontrou a TAG no texto, FORÇA O OCR
-    if not match:
-        # Aumenta a resolução (2.5) para garantir que o Tesseract lê perfeitamente
-        pix = pagina_pdf.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        
-        # Converte a imagem da página em texto
-        texto_ocr = pytesseract.image_to_string(img, lang='por')
-        
-        # Procura a TAG novamente, agora no texto que a visão computacional extraiu
-        match = re.search(padrao, texto_ocr, re.IGNORECASE | re.DOTALL)
-    
-    # Se encontrou a TAG (seja na 1ª ou na 2ª tentativa), devolve os dados
-    if match:
-        titulo_arquivo = match.group(1).strip()
-        # Se o OCR comer o ".pdf" por falha de leitura, garantimos que ele existe
+    # Função interna para formatar o sucesso e evitar código repetido
+    def formatar_sucesso(m):
+        titulo_arquivo = m.group(1).strip()
         if not titulo_arquivo.lower().endswith('.pdf'):
             titulo_arquivo += '.pdf'
-            
         return {
             "sucesso": True,
             "titulo": titulo_arquivo,
-            "pag_atual": int(match.group(2)),
-            "pag_total": int(match.group(3))
+            "pag_atual": int(m.group(2)),
+            "pag_total": int(m.group(3))
         }
-    
-    return {"sucesso": False}
 
+    if match:
+        return formatar_sucesso(match)
+    
+    # 2ª TENTATIVA: OCR com Roleta de Rotação (Scan, Fotos Tortas, etc)
+    pix = pagina_pdf.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+    img_original = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    
+    # Tenta ler a imagem na posição original e rotacionada (0, 90, 180, 270 graus)
+    angulos = [0, 90, 180, 270]
+    for angulo in angulos:
+        if angulo == 0:
+            img = img_original
+        else:
+            # Gira a imagem (expand=True garante que as bordas não são cortadas)
+            img = img_original.rotate(angulo, expand=True)
+            
+        texto_ocr = pytesseract.image_to_string(img, lang='por')
+        match = re.search(padrao, texto_ocr, re.IGNORECASE | re.DOTALL)
+        
+        if match:
+            return formatar_sucesso(match)
+    
+    # Se rodou 360º e não achou nada, a página realmente não tem TAG
+    return {"sucesso": False}
 # ==============================================================================
 # INTERFACE DO UTILIZADOR
 # ==============================================================================
