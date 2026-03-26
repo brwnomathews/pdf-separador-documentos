@@ -1,5 +1,4 @@
 import streamlit as st
-from pdf2image import convert_from_bytes
 import pymupdf
 from rapidfuzz import fuzz
 from io import BytesIO
@@ -9,18 +8,16 @@ import time
 from datetime import date
 from openai import OpenAI
 import base64
-import re   # Adicionado aqui para evitar erro
+import re
 
 st.set_page_config(page_title="Separador por TAG - Somente IA", layout="wide")
 
 st.title("📄 Separador de PDFs por TAG - **Modo Exclusivo com IA**")
-st.markdown("**Usando apenas Nemotron Nano 12B 2 VL (free)** via OpenRouter")
+st.markdown("**Nemotron Nano 12B 2 VL (free)** via OpenRouter")
 
 # ====================== CONFIGURAÇÕES ======================
-TAXA_SIMILARIDADE = st.slider("Taxa mínima de similaridade para agrupamento (%)", 
-                              min_value=75, max_value=100, value=100, step=1)
+TAXA_SIMILARIDADE = st.slider("Taxa mínima de similaridade (%)", min_value=75, max_value=98, value=87, step=1)
 
-# OpenRouter Client
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=st.secrets.get("OPENROUTER_API_KEY", "")
@@ -34,9 +31,8 @@ def image_to_base64(img: Image.Image) -> str:
     return base64.b64encode(buffered.getvalue()).decode()
 
 def extrair_tag_com_ia(img: Image.Image, page_num: int) -> str:
-    """Chama exclusivamente o Nemotron Nano VL"""
     if not st.secrets.get("OPENROUTER_API_KEY"):
-        st.error("❌ Configure sua chave OPENROUTER_API_KEY nos Secrets do app.")
+        st.error("❌ Configure OPENROUTER_API_KEY nos Secrets.")
         st.stop()
 
     cache_key = f"page_{page_num}"
@@ -47,46 +43,42 @@ def extrair_tag_com_ia(img: Image.Image, page_num: int) -> str:
         base64_image = image_to_base64(img)
 
         prompt = f"""
-Você é um especialista em extração de informações de documentos escaneados em português.
+Analise a imagem da página {page_num} e extraia a TAG entre os X's.
 
-Analise a imagem da página {page_num} e extraia a TAG delimitada por várias letras "X".
+Formato esperado: XXXXX Nome completo - NR01 - 20122025 XXXXX
 
-Formato típico: XXXXX Nome completo - NR01 - 20122025 XXXXX
-
-Instruções:
-- Extraia apenas o conteúdo principal da TAG
-- Corrija erros comuns de OCR (O vira 0, I/l vira 1 quando fizer sentido)
-- Responda **exatamente** no formato: "Nome Completo - NR01 - 20122025"
-- Se não encontrar TAG clara, responda apenas: "SEM_TAG"
-
-Não adicione nenhuma explicação ou texto extra.
+Regras:
+- Retorne apenas a TAG limpa no formato "Nome Completo - NR01 - 20122025"
+- Corrija erros de OCR (O→0, I/l→1 quando fizer sentido)
+- Se não houver TAG clara, retorne exatamente: SEM_TAG
+- Nenhuma explicação, nenhum texto adicional.
 """
 
         response = client.chat.completions.create(
             model="nvidia/nemotron-nano-12b-v2-vl:free",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
-                    ]
-                }
-            ],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
+                ]
+            }],
             temperature=0.0,
-            max_tokens=120
+            max_tokens=100
         )
 
-        tag = response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        tag = content.strip() if content else "SEM_TAG"
+
         ia_cache[cache_key] = tag
         return tag
 
     except Exception as e:
-        st.warning(f"Erro na IA (página {page_num}): {str(e)[:100]}...")
+        st.warning(f"Erro na IA (página {page_num}): {str(e)[:120]}")
         return f"SEM_TAG_PAG_{page_num}"
 
 def normalizar_tag(texto: str) -> str:
-    if not texto or "SEM_TAG" in texto:
+    if not texto or "SEM_TAG" in texto.upper():
         return "SEM_TAG"
     texto = texto.upper().strip()
     texto = re.sub(r'\s+', '', texto)
@@ -95,19 +87,19 @@ def normalizar_tag(texto: str) -> str:
     texto = re.sub(r'[I|L]', '1', texto)
     return texto
 
-# ====================== UPLOAD E PROCESSAMENTO ======================
+# ====================== PROCESSAMENTO ======================
 uploaded_files = st.file_uploader("Arraste ou selecione os PDFs", type="pdf", accept_multiple_files=True)
 
 if uploaded_files and st.button("🚀 Iniciar Processamento EXCLUSIVO com Nemotron Nano VL", type="primary"):
     
     if not st.secrets.get("OPENROUTER_API_KEY"):
-        st.error("⚠️ Você precisa configurar a chave OPENROUTER_API_KEY nos Secrets do Streamlit Cloud.")
+        st.error("⚠️ Configure sua chave OPENROUTER_API_KEY nos Secrets do app.")
         st.stop()
 
     progress_bar = st.progress(0)
     status_text = st.empty()
     log_container = st.container()
-    log_container.markdown("### 📜 Log em Tempo Real - Modo IA Exclusivo")
+    log_container.markdown("### 📜 Log em Tempo Real")
     log_area = log_container.empty()
 
     full_log = ""
@@ -139,26 +131,22 @@ if uploaded_files and st.button("🚀 Iniciar Processamento EXCLUSIVO com Nemotr
                 
                 tag_norm = normalizar_tag(tag_da_pagina)
                 
-                # Agrupamento global
+                # Agrupamento
                 melhor_sim = 0
-                melhor_tag_rep = ""
                 melhor_grupo = None
-                
                 for tnorm, grupo in grupos.items():
                     sim = fuzz.ratio(tnorm, tag_norm)
                     if sim > melhor_sim:
                         melhor_sim = sim
-                        melhor_tag_rep = grupo["rep_nome"]
                         melhor_grupo = grupo
                 
-                if melhor_grupo and melhor_sim >= TAXA_SIMILARIDADE and "SEM_TAG" not in tag_da_pagina:
+                if melhor_grupo and melhor_sim >= TAXA_SIMILARIDADE and "SEM_TAG" not in tag_da_pagina.upper():
                     melhor_grupo["paginas"].append(page_num)
                     full_log += f"🔗 Similaridade **{melhor_sim}%** → Agrupando página {page_num+1}\n---\n"
                 else:
-                    if "SEM_TAG" in tag_da_pagina:
-                        tag_da_pagina = f"SEM_TAG_PAG_{page_num+1}"
-                    grupos[tag_norm] = {"rep_nome": tag_da_pagina, "paginas": [page_num]}
-                    full_log += f"🆕 Novo grupo criado pela IA\n---\n"
+                    nome_grupo = tag_da_pagina if "SEM_TAG" not in tag_da_pagina.upper() else f"SEM_TAG_PAG_{page_num+1}"
+                    grupos[tag_norm] = {"rep_nome": nome_grupo, "paginas": [page_num]}
+                    full_log += f"🆕 Novo grupo criado\n---\n"
                 
                 log_area.markdown(full_log)
             
@@ -179,19 +167,19 @@ if uploaded_files and st.button("🚀 Iniciar Processamento EXCLUSIVO com Nemotr
                 log_area.markdown(full_log)
             
             doc.close()
-            time.sleep(0.3)
+            time.sleep(0.4)
 
     zip_buffer.seek(0)
     progress_bar.progress(100)
-    status_text.success("✅ Processamento exclusivo com IA concluído!")
-    
+    status_text.success("✅ Processamento concluído!")
+
     data_atual = date.today().isoformat()
     st.download_button(
-        label="📥 Baixar ZIP com todos os PDFs",
+        label="📥 Baixar ZIP",
         data=zip_buffer,
         file_name=f"Lote_IA_Nemotron_{data_atual}.zip",
         mime="application/zip",
         type="primary"
     )
 
-st.caption("Modo 100% IA • Nemotron Nano 12B 2 VL (free) via OpenRouter")
+st.caption("Modo 100% IA • Nemotron Nano 12B 2 VL (free)")
