@@ -10,7 +10,7 @@ import re
 st.set_page_config(page_title="Separador por TAG - IA Simples", layout="wide")
 
 st.title("📄 Separador de PDFs por TAG")
-st.markdown("**Modo Simples com IA** — DeepSeek Chat (free) usando o texto já existente no PDF")
+st.markdown("**Modo Simples com IA** — DeepSeek R1 (free) usando o texto já existente no PDF")
 
 # ====================== CONFIGURAÇÃO ======================
 client = OpenAI(
@@ -21,7 +21,6 @@ client = OpenAI(
 ia_cache = {}
 
 def extrair_tag_com_ia(texto_pagina: str, page_num: int) -> str:
-    """Extrai TAG usando apenas texto + DeepSeek"""
     if not st.secrets.get("OPENROUTER_API_KEY"):
         st.error("❌ Configure OPENROUTER_API_KEY nos Secrets.")
         st.stop()
@@ -37,17 +36,17 @@ Analise o texto abaixo e extraia a TAG que está entre os X's.
 Texto da página {page_num}:
 {texto_pagina}
 
-Formato típico esperado: XXXXX Nome completo - NR01 - 20122025 XXXXX
+Formato típico: XXXXX Nome completo - NR01 - 20122025 XXXXX
 
 Regras:
 - Retorne APENAS a TAG limpa no formato: "Nome Completo - NR01 - 20122025"
 - Corrija erros comuns de OCR (O → 0, I/l → 1)
 - Se não encontrar TAG clara, retorne exatamente: SEM_TAG
-- Nenhuma explicação, nenhum texto extra.
+- Não coloque explicação, aspas ou texto extra.
 """
 
         response = client.chat.completions.create(
-            model="deepseek/deepseek-chat:free",
+            model="deepseek/deepseek-r1:free",     # ← Modelo gratuito atualizado
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=100
@@ -58,7 +57,7 @@ Regras:
         return tag
 
     except Exception as e:
-        st.warning(f"Erro na IA (página {page_num}): {str(e)[:100]}")
+        st.warning(f"Erro na IA (página {page_num}): {str(e)[:120]}")
         return f"SEM_TAG_PAG_{page_num}"
 
 def normalizar_tag(texto: str) -> str:
@@ -104,7 +103,7 @@ if uploaded_files and st.button("🚀 Iniciar Processamento Simples com IA", typ
                 progress_bar.progress(perc)
                 
                 page = doc[page_num]
-                texto_pagina = page.get_text("text")   # ← Usa o OCR já existente
+                texto_pagina = page.get_text("text")   # usa o OCR já existente
                 
                 tag_da_pagina = extrair_tag_com_ia(texto_pagina, page_num + 1)
                 tag_normalizada = normalizar_tag(tag_da_pagina)
@@ -157,4 +156,4 @@ if uploaded_files and st.button("🚀 Iniciar Processamento Simples com IA", typ
         type="primary"
     )
 
-st.caption("Versão simples • DeepSeek Chat (free) usando texto já existente no PDF")
+st.caption("Versão simples • DeepSeek R1 (free) • Usa texto já existente no PDF")
