@@ -1,154 +1,141 @@
 import streamlit as st
-import fitz  # PyMuPDF
+from pdf2image import convert_from_bytes
 import pytesseract
-from PIL import Image
+import pymupdf
+from rapidfuzz import fuzz
 import re
-import io
+from io import BytesIO
 import zipfile
-from collections import defaultdict
+from PIL import Image
+import time
 
-st.set_page_config(page_title="REFRAMINAS Simplificado", page_icon="⚡", layout="centered")
+st.set_page_config(page_title="Separador por TAG - Tempo Real", layout="wide")
+st.title("📄 Separador de PDFs por TAG com Log em Tempo Real")
+st.markdown("**Agrupamento global** — páginas com a mesma TAG são reunidas mesmo que estejam distantes no PDF.")
 
-# ==============================================================================
-# FUNÇÃO DE EXTRAÇÃO (Apenas TAG + Rotação 360º)
-# ==============================================================================
-def extrair_tag_pagina(pagina_pdf):
-    # Procura estritamente por XXXXX [Qualquer Coisa] XXXXX
-    padrao_tag = r'[xX][\sxX]{3,}[xX]\s*(.*?)\s*[xX][\sxX]{3,}[xX]'
-    
-    # 1ª TENTATIVA: Texto Nativo
-    texto_nativo = re.sub(r'\s+', ' ', pagina_pdf.get_text())
-    match_nativo = re.search(padrao_tag, texto_nativo, re.IGNORECASE)
-    
-    if match_nativo:
-        tag = match_nativo.group(1).strip()
-        if not tag.lower().endswith('.pdf'): tag += '.pdf'
-        return {"sucesso": True, "tag": tag, "metodo": "Texto Nativo"}
+TAXA_SIMILARIDADE = st.slider("Taxa mínima de similaridade (%)", min_value=80, max_value=98, value=88, step=1)
 
-    # 2ª TENTATIVA: OCR com Rotação 360º
-    pix = pagina_pdf.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
-    img_original = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+def normalizar_tag(texto: str) -> str:
+    texto = texto.upper().strip()
+    texto = re.sub(r'\s+', '', texto)
+    texto = re.sub(r'NR0?[I1LO]+', 'NR01', texto)
+    texto = re.sub(r'O', '0', texto)
+    texto = re.sub(r'[I|L]', '1', texto)
+    return texto
+
+def extrair_tag(texto: str) -> str:
+    match = re.search(r'X{4,}\s*(.+?)\s*-?\s*NR0?1?\s*-?\s*(\d{6,8})\s*X{4,}', texto, re.I | re.DOTALL)
+    if match:
+        nome = re.sub(r'[\\/:*?"<>|]', '', match.group(1).strip())
+        numero = match.group(2).strip()
+        return f"{nome} - NR01 - {numero}".strip()
     
-    textos_lidos_debug = []
-    angulos = [0, 90, 180, 270]
-    
-    for angulo in angulos:
-        img = img_original if angulo == 0 else img_original.rotate(angulo, expand=True, fillcolor="white")
+    match_fallback = re.search(r'X{4,}\s*(.+?)\s*X{4,}', texto, re.I | re.DOTALL)
+    if match_fallback:
+        nome = re.sub(r'[\\/:*?"<>|]', '', match_fallback.group(1).strip())[:100]
+        return nome if len(nome) > 3 else "SEM_TAG"
+    return "SEM_TAG"
+
+# ====================== INTERFACE ======================
+uploaded_files = st.file_uploader("Arraste ou selecione os PDFs", type="pdf", accept_multiple_files=True)
+
+if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Real", type="primary"):
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    log_container = st.expander("📜 Janela de Log em Tempo Real", expanded=True)
+    log_area = log_container.empty()
+
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+        total_arquivos = len(uploaded_files)
         
-        # --psm 11 ajuda a ler textos espalhados ou soltos nas margens
-        texto_ocr = pytesseract.image_to_string(img, lang='por', config='--psm 11')
-        texto_ocr_limpo = re.sub(r'\s+', ' ', texto_ocr)
-        
-        # Guarda amostra para o log
-        amostra = texto_ocr_limpo[:100].strip()
-        if amostra:
-            textos_lidos_debug.append(f"[{angulo}º: {amostra}...]")
+        for idx, uploaded_file in enumerate(uploaded_files):
+            file_progress = (idx / total_arquivos)
+            status_text.info(f"Processando arquivo {idx+1}/{total_arquivos}: **{uploaded_file.name}**")
             
-        match_ocr = re.search(padrao_tag, texto_ocr_limpo, re.IGNORECASE)
-        
-        if match_ocr:
-            tag = match_ocr.group(1).strip()
+            pdf_bytes = uploaded_file.read()
+            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
-            # Correção rápida para o efeito espelho (caso o scanner leia de trás para a frente)
-            if tag.startswith("VAIS") or tag.startswith("VAI"):
-                tag = tag[::-1]
+            # Estrutura de grupos globais (chave = tag normalizada)
+            grupos = {}  # tag_norm -> {"rep_nome": str, "paginas": list}
+            
+            for page_num in range(len(doc)):
+                perc = int(((idx + (page_num+1)/len(doc)) / total_arquivos) * 100)
+                progress_bar.progress(perc)
                 
-            if not tag.lower().endswith('.pdf'): tag += '.pdf'
-            return {"sucesso": True, "tag": tag, "metodo": f"OCR ({angulo}º)"}
-
-    # Se falhou, verifica se é uma página em branco para não poluir o log desnecessariamente
-    if not any(t for t in textos_lidos_debug if t and "ILEGÍVEL" not in t.upper()):
-         return {"sucesso": False, "debug": "PÁGINA EM BRANCO OU ILEGÍVEL", "is_blank": True}
-
-    debug_string = " | ".join(textos_lidos_debug)
-    return {"sucesso": False, "debug": debug_string, "is_blank": False}
-
-# ==============================================================================
-# INTERFACE DO UTILIZADOR
-# ==============================================================================
-st.title("⚡ REFRAMINAS Simplificado")
-st.markdown("### Agrupamento Direto por TAG")
-st.markdown("Agrupa todas as páginas que possuam a mesma marcação `XXXXX Nome do Arquivo XXXXX`.")
-
-arquivos_upados = st.file_uploader("Selecione os ficheiros PDF", type=["pdf"], accept_multiple_files=True)
-
-if st.button("Processar Documentos", type="primary"):
-    if not arquivos_upados:
-        st.warning("Selecione pelo menos um ficheiro.")
-        st.stop()
-
-    arquivos_para_zip = {}
-    log_divergencias = "RELATÓRIO DE PÁGINAS SEM TAG\n============================\n\n"
-    houve_divergencias = False
-
-    with st.status("A iniciar varredura e agrupamento...", expanded=True) as status_box:
-        
-        for arquivo in arquivos_upados:
-            status_box.update(label=f"A ler: {arquivo.name}...")
-            
-            pdf_bytes = arquivo.read()
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            total_paginas = len(doc)
-            
-            # Dicionário simples: { "NomeDaTag.pdf": [0, 1, 4, 5] }
-            grupos_de_paginas = defaultdict(list)
-
-            for num_pagina in range(total_paginas):
-                status_box.update(label=f"A analisar página {num_pagina + 1}/{total_paginas}...")
-                pagina = doc.load_page(num_pagina)
+                page = doc[page_num]
+                pix = page.get_pixmap(dpi=180)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                dados = extrair_tag_pagina(pagina)
+                # Rotação automática simples
+                text = ""
+                for angle in [0, 90, 180, 270]:
+                    rotated = img.rotate(angle, expand=True)
+                    text = pytesseract.image_to_string(rotated, lang='por')
+                    if len(text.strip()) > 30:
+                        img = rotated
+                        break
                 
-                if dados["sucesso"]:
-                    tag_arquivo = dados["tag"]
-                    grupos_de_paginas[tag_arquivo].append(num_pagina)
+                tag_da_pagina = extrair_tag(text)
+                tag_norm = normalizar_tag(tag_da_pagina)
+                
+                # Log da página
+                log_msg = f"**Página {page_num+1}** → TAG: `{tag_da_pagina}`"
+                current_log = log_area.markdown(log_msg + "\n\n" + (log_area.markdown if hasattr(log_area, 'markdown') else ""))
+                
+                # Busca melhor grupo existente
+                melhor_sim = 0
+                melhor_tag_rep = ""
+                melhor_grupo = None
+                
+                for tnorm, grupo in grupos.items():
+                    sim = fuzz.ratio(tnorm, tag_norm)
+                    if sim > melhor_sim:
+                        melhor_sim = sim
+                        melhor_tag_rep = grupo["rep_nome"]
+                        melhor_grupo = grupo
+                
+                if melhor_grupo and melhor_sim >= TAXA_SIMILARIDADE:
+                    melhor_grupo["paginas"].append(page_num)
+                    log_area.markdown(f"{log_msg}\n"
+                                      f"🔗 Similaridade com grupo **{melhor_tag_rep}** = **{melhor_sim}%**\n"
+                                      f"✅ **Agrupando página {page_num+1} ao grupo existente**\n---", unsafe_allow_html=True)
                 else:
-                    if not dados.get("is_blank", False):
-                        texto_debug = dados.get('debug', '')
-                        log_divergencias += f"[SEM TAG] Ficheiro: {arquivo.name} | Página: {num_pagina + 1}\n"
-                        log_divergencias += f"   Amostra do que foi lido: {texto_debug}\n\n"
-                        houve_divergencias = True
-
-            status_box.update(label=f"A gerar PDFs agrupados para {arquivo.name}...")
-
-            # Montagem dos PDFs finais baseada nos grupos criados
-            for tag_doc, indices_paginas in grupos_de_paginas.items():
-                novo_pdf = fitz.open()
-                
-                for idx in indices_paginas:
-                    novo_pdf.insert_pdf(doc, from_page=idx, to_page=idx)
-                
-                pdf_final_bytes = novo_pdf.write()
-                
-                # Evita sobrepor ficheiros com o mesmo nome se enviar vários PDFs originais
-                titulo_final = tag_doc
-                contador = 1
-                while titulo_final in arquivos_para_zip:
-                    titulo_final = tag_doc.replace(".pdf", f"({contador}).pdf")
-                    contador += 1
-                    
-                arquivos_para_zip[titulo_final] = pdf_final_bytes
-
-        status_box.update(label="Processamento finalizado!", state="complete", expanded=False)
-
-    if arquivos_para_zip:
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-            for nome_arquivo, data in arquivos_para_zip.items():
-                zip_file.writestr(nome_arquivo, data)
-            if houve_divergencias:
-                zip_file.writestr("log_paginas_sem_tag.txt", log_divergencias.encode("utf-8"))
-        
-        st.success("Tudo agrupado com sucesso!")
-        if houve_divergencias:
-            st.warning("Atenção: Algumas páginas não possuíam TAG ou estavam ilegíveis. Consulte o log no ZIP.")
+                    # Novo grupo
+                    grupos[tag_norm] = {"rep_nome": tag_da_pagina, "paginas": [page_num]}
+                    log_area.markdown(f"{log_msg}\n"
+                                      f"🆕 **Nova TAG detectada** → Iniciando novo grupo\n---", unsafe_allow_html=True)
             
-        st.download_button(
-            label="📦 Descarregar Documentos Agrupados (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name="Processos_REFRAMINAS_Agrupados.zip",
-            mime="application/zip",
-            type="primary"
-        )
-    else:
-        st.error("Nenhuma TAG foi encontrada nos ficheiros. Verifique se as marcações existem.")
+            # Salvar cada grupo
+            log_area.markdown(f"**📦 Montando {len(grupos)} arquivos finais para {uploaded_file.name}...**\n", unsafe_allow_html=True)
+            
+            for tag_norm, grupo in grupos.items():
+                novo_doc = pymupdf.open()
+                paginas_ordenadas = sorted(grupo["paginas"])
+                for p in paginas_ordenadas:
+                    novo_doc.insert_pdf(doc, from_page=p, to_page=p)
+                
+                pdf_bytes_out = novo_doc.tobytes()
+                nome_final = f"{grupo['rep_nome']}.pdf"
+                zip_file.writestr(nome_final, pdf_bytes_out)
+                novo_doc.close()
+                
+                log_area.markdown(f"✅ **Grupo montado**: `{grupo['rep_nome']}` • **{len(paginas_ordenadas)} páginas**\n", unsafe_allow_html=True)
+            
+            doc.close()
+            time.sleep(0.3)  # pequeno delay para visualização do log
+
+    # Download
+    zip_buffer.seek(0)
+    progress_bar.progress(100)
+    status_text.success("✅ Processamento concluído com sucesso!")
+    
+    st.download_button(
+        label="📥 Baixar ZIP com todos os PDFs separados",
+        data=zip_buffer,
+        file_name=f"Lote_Processado_{st.date.today()}.zip",
+        mime="application/zip",
+        type="primary"
+    )
+
+st.caption("• Agrupamento global de páginas • Log em tempo real • Rotação + OCR automático • Streamlit Community Cloud")
