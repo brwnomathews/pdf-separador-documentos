@@ -42,7 +42,20 @@ JSON ESPERADO: {"arquivo": "TEXTO EXTRAIDO DA TAG", "rotacao": 0}"""
 # Área de Upload Centralizada
 uploaded_file = st.file_uploader("Selecione o arquivo PDF digitalizado", type=["pdf"])
 
-if st.button("🚀 Iniciar Processamento", use_container_width=True) and uploaded_file:
+# ==========================================
+# LAYOUT DE BOTÕES LADO A LADO
+# ==========================================
+# Criamos duas colunas na interface
+col1, col2 = st.columns(2)
+
+# Colocamos o botão de Iniciar na coluna da esquerda
+with col1:
+    btn_iniciar = st.button("🚀 Iniciar Processamento", use_container_width=True)
+
+# Criamos um "espaço fantasma" na coluna da direita para o botão de download que virá depois
+download_placeholder = col2.empty()
+
+if btn_iniciar and uploaded_file:
     
     model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
     
@@ -133,10 +146,15 @@ if st.button("🚀 Iniciar Processamento", use_container_width=True) and uploade
         add_log("Processo finalizado com sucesso. ZIP pronto!")
         st.success("✅ Documentos processados com sucesso!")
         
-        st.download_button(
-            label="📥 Baixar Documentos (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name="REFRAMINAS_Documentos.zip",
-            mime="application/zip",
-            use_container_width=True
-        )
+        # ==========================================
+        # INJETANDO O BOTÃO NA COLUNA DA DIREITA
+        # ==========================================
+        # Agora injetamos o botão de download naquele espaço fantasma que deixamos ao lado do Iniciar
+        with download_placeholder:
+            st.download_button(
+                label="📥 Baixar Documentos (ZIP)",
+                data=zip_buffer.getvalue(),
+                file_name="REFRAMINAS_Documentos.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
