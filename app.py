@@ -1,98 +1,153 @@
 import streamlit as st
 from pdf2image import convert_from_bytes
-import pytesseract
 import pymupdf
 from rapidfuzz import fuzz
-import re
 from io import BytesIO
 import zipfile
 from PIL import Image
 import time
-from datetime import date   # ← Correção aqui
+from datetime import date
+from openai import OpenAI
+import base64
 
-st.set_page_config(page_title="Separador por TAG - Tempo Real", layout="wide")
+st.set_page_config(page_title="Separador por TAG - Somente IA", layout="wide")
 
-st.title("📄 Separador de PDFs por TAG com Log em Tempo Real")
-st.markdown("**Agrupamento global** — páginas com a mesma TAG são reunidas mesmo que estejam distantes no PDF.")
+st.title("📄 Separador de PDFs por TAG - **Modo Exclusivo com IA**")
+st.markdown("**Usando apenas Nemotron Nano 12B 2 VL (free)** — Sem regex, sem pytesseract como principal.")
 
-TAXA_SIMILARIDADE = st.slider("Taxa mínima de similaridade (%)", min_value=80, max_value=100, value=100, step=1)
+# ====================== CONFIGURAÇÕES ======================
+TAXA_SIMILARIDADE = st.slider("Taxa mínima de similaridade para agrupamento (%)", 
+                              min_value=75, max_value=98, value=87, step=1)
+
+# OpenRouter Client
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=st.secrets.get("OPENROUTER_API_KEY", "")
+)
+
+ia_cache = {}  # Cache simples por conteúdo da página
+
+def image_to_base64(img: Image.Image) -> str:
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
+def extrair_tag_com_ia(img: Image.Image, page_num: int) -> str:
+    """Chama exclusivamente o Nemotron Nano VL com a imagem"""
+    if not st.secrets.get("OPENROUTER_API_KEY"):
+        st.error("❌ Chave OPENROUTER_API_KEY não configurada nos Secrets.")
+        st.stop()
+
+    # Cache simples
+    cache_key = f"page_{page_num}_{hash(str(img.size))}"
+    if cache_key in ia_cache:
+        return ia_cache[cache_key]
+
+    try:
+        base64_image = image_to_base64(img)
+
+        prompt = f"""
+Você é um especialista em extração precisa de informações de documentos escaneados em português brasileiro.
+
+Analise cuidadosamente a imagem da página {page_num} e extraia a TAG que está delimitada por várias letras "X".
+
+Formato esperado da TAG:
+XXXXX Nome completo da pessoa - NR01 - 20122025 XXXXX
+
+Instruções importantes:
+- Extraia apenas o conteúdo principal entre os X's.
+- Corrija erros comuns de OCR (ex: O → 0, I/l → 1, espaços extras).
+- Retorne a TAG limpa no formato exato: "Nome Completo - NR01 - 20122025"
+- Se não conseguir identificar claramente a TAG, retorne exatamente: "SEM_TAG"
+
+Responda **apenas** com a TAG ou "SEM_TAG". Sem explicações, sem texto adicional.
+"""
+
+        response = client.chat.completions.create(
+            model="nvidia/nemotron-nano-12b-v2-vl:free",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{base64_image}"}
+                        }
+                    ]
+                }
+            ],
+            temperature=0.0,
+            max_tokens=100
+        )
+
+        tag_extraida = response.choices[0].message.content.strip()
+        ia_cache[cache_key] = tag_extraida
+        return tag_extraida
+
+    except Exception as e:
+        st.warning(f"Erro na IA na página {page_num}: {str(e)[:80]}...")
+        return "SEM_TAG"
 
 def normalizar_tag(texto: str) -> str:
+    if not texto or texto == "SEM_TAG":
+        return "SEM_TAG"
     texto = texto.upper().strip()
-    texto = re.sub(r'\s+', '', texto)
+    texto = re.sub(r'\s+', '', texto)  # precisa importar re abaixo
     texto = re.sub(r'NR0?[I1LO]+', 'NR01', texto)
     texto = re.sub(r'O', '0', texto)
     texto = re.sub(r'[I|L]', '1', texto)
     return texto
 
-def extrair_tag(texto: str) -> str:
-    match = re.search(r'X{4,}\s*(.+?)\s*-?\s*NR0?1?\s*-?\s*(\d{6,8})\s*X{4,}', texto, re.I | re.DOTALL)
-    if match:
-        nome = re.sub(r'[\\/:*?"<>|]', '', match.group(1).strip())
-        numero = match.group(2).strip()
-        return f"{nome} - NR01 - {numero}".strip()
-    
-    match_fallback = re.search(r'X{4,}\s*(.+?)\s*X{4,}', texto, re.I | re.DOTALL)
-    if match_fallback:
-        nome = re.sub(r'[\\/:*?"<>|]', '', match_fallback.group(1).strip())[:100]
-        return nome if len(nome) > 3 else "SEM_TAG"
-    return "SEM_TAG"
-
-# ====================== UPLOAD ======================
+# ====================== PROCESSAMENTO ======================
 uploaded_files = st.file_uploader("Arraste ou selecione os PDFs", type="pdf", accept_multiple_files=True)
 
-if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Real", type="primary"):
+if uploaded_files and st.button("🚀 Iniciar Processamento EXCLUSIVO com Nemotron Nano VL", type="primary"):
     
+    if not st.secrets.get("OPENROUTER_API_KEY"):
+        st.error("⚠️ Configure sua chave OPENROUTER_API_KEY nos Secrets do Streamlit Cloud primeiro.")
+        st.stop()
+
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
-    # Container para o log em tempo real
     log_container = st.container()
-    log_container.markdown("### 📜 Log em Tempo Real")
+    log_container.markdown("### 📜 Log em Tempo Real - Modo IA Exclusivo")
     log_area = log_container.empty()
-    
-    full_log = ""
 
+    full_log = ""
     zip_buffer = BytesIO()
+
+    import re  # import aqui para evitar erro
+
     with zipfile.ZipFile(zip_buffer, "w") as zip_file:
         total_arquivos = len(uploaded_files)
         
         for idx, uploaded_file in enumerate(uploaded_files):
-            status_text.info(f"📂 Processando arquivo {idx+1}/{total_arquivos}: **{uploaded_file.name}**")
-            
+            status_text.info(f"📂 Processando com IA: **{uploaded_file.name}**")
             pdf_bytes = uploaded_file.read()
             doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
-            grupos = {}  # tag_norm -> {"rep_nome": str, "paginas": list}
+            grupos = {}   # tag_norm -> {"rep_nome": str, "paginas": list}
             
             for page_num in range(len(doc)):
-                # Progresso
                 perc = int(((idx + (page_num + 1) / len(doc)) / total_arquivos) * 100)
                 progress_bar.progress(perc)
                 
-                # Extrair imagem da página
+                # Renderiza página em alta qualidade
                 page = doc[page_num]
-                pix = page.get_pixmap(dpi=180)
+                pix = page.get_pixmap(dpi=220)   # alta resolução para melhor visão da IA
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # Rotação automática + OCR
-                text = ""
-                for angle in [0, 90, 180, 270]:
-                    rotated = img.rotate(angle, expand=True)
-                    text = pytesseract.image_to_string(rotated, lang='por')
-                    if len(text.strip()) > 30:
-                        img = rotated
-                        break
+                # Chama a IA (única fonte de extração)
+                tag_da_pagina = extrair_tag_com_ia(img, page_num + 1)
                 
-                tag_da_pagina = extrair_tag(text)
-                tag_norm = normalizar_tag(tag_da_pagina)
-                
-                # Log da página
-                log_msg = f"**Página {page_num+1}** → TAG encontrada: `{tag_da_pagina}`"
+                log_msg = f"**Página {page_num+1}** → IA extraiu: `{tag_da_pagina}`"
                 full_log += log_msg + "\n\n"
                 log_area.markdown(full_log)
                 
-                # Busca melhor grupo existente
+                tag_norm = normalizar_tag(tag_da_pagina)
+                
+                # Agrupamento global por similaridade
                 melhor_sim = 0
                 melhor_tag_rep = ""
                 melhor_grupo = None
@@ -104,24 +159,24 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
                         melhor_tag_rep = grupo["rep_nome"]
                         melhor_grupo = grupo
                 
-                if melhor_grupo and melhor_sim >= TAXA_SIMILARIDADE:
+                if melhor_grupo and melhor_sim >= TAXA_SIMILARIDADE and tag_da_pagina != "SEM_TAG":
                     melhor_grupo["paginas"].append(page_num)
-                    full_log += f"🔗 Similaridade com grupo **{melhor_tag_rep}** = **{melhor_sim}%**  \n"
-                    full_log += f"✅ **Agrupando página {page_num+1} ao grupo existente**\n---\n"
+                    full_log += f"🔗 Similaridade **{melhor_sim}%** → Agrupando página {page_num+1} ao grupo\n---\n"
                 else:
+                    if tag_da_pagina == "SEM_TAG":
+                        tag_da_pagina = f"SEM_TAG_PAG_{page_num+1}"
                     grupos[tag_norm] = {"rep_nome": tag_da_pagina, "paginas": [page_num]}
-                    full_log += f"🆕 **Nova TAG detectada** → Iniciando novo grupo\n---\n"
+                    full_log += f"🆕 **Novo grupo criado** pela IA\n---\n"
                 
                 log_area.markdown(full_log)
             
             # Salvar os grupos deste arquivo
-            full_log += f"**📦 Montando {len(grupos)} arquivos finais para {uploaded_file.name}...**\n\n"
+            full_log += f"**📦 Montando {len(grupos)} documentos finais para {uploaded_file.name}**\n\n"
             log_area.markdown(full_log)
             
-            for tag_norm, grupo in grupos.items():
+            for grupo in grupos.values():
                 novo_doc = pymupdf.open()
-                paginas_ordenadas = sorted(grupo["paginas"])
-                for p in paginas_ordenadas:
+                for p in sorted(grupo["paginas"]):
                     novo_doc.insert_pdf(doc, from_page=p, to_page=p)
                 
                 pdf_bytes_out = novo_doc.tobytes()
@@ -129,26 +184,24 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
                 zip_file.writestr(nome_final, pdf_bytes_out)
                 novo_doc.close()
                 
-                full_log += f"✅ **Grupo montado**: `{grupo['rep_nome']}` • **{len(paginas_ordenadas)} páginas**\n"
+                full_log += f"✅ **Grupo salvo**: `{grupo['rep_nome']}` • {len(grupo['paginas'])} páginas\n"
                 log_area.markdown(full_log)
             
             doc.close()
-            time.sleep(0.2)
+            time.sleep(0.3)  # delay para visualizar o log
 
-    # Finalização
+    # Final
     zip_buffer.seek(0)
     progress_bar.progress(100)
-    status_text.success("✅ Processamento concluído com sucesso!")
+    status_text.success("✅ Processamento exclusivo com IA concluído!")
     
-    # Correção: usando datetime.date.today()
     data_atual = date.today().isoformat()
-    
     st.download_button(
-        label="📥 Baixar ZIP com todos os PDFs separados",
+        label="📥 Baixar ZIP com todos os PDFs",
         data=zip_buffer,
-        file_name=f"Lote_Processado_{data_atual}.zip",
+        file_name=f"Lote_IA_Nemotron_{data_atual}.zip",
         mime="application/zip",
         type="primary"
     )
 
-st.caption("• Agrupamento global de páginas • Log em tempo real • Rotação + OCR automático • Streamlit Cloud")
+st.caption("Modo Exclusivo com Nemotron Nano 12B 2 VL (free) via OpenRouter • Teste de qualidade da IA")
