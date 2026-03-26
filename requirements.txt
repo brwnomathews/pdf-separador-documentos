@@ -1,6 +1,6 @@
 streamlit
 pymupdf
-pytesseract
 pdf2image
 Pillow
 rapidfuzz
+openai
