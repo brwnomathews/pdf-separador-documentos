@@ -15,7 +15,7 @@ st.set_page_config(page_title="Separador por TAG - Tempo Real", layout="wide")
 st.title("📄 Separador de PDFs por TAG com Log em Tempo Real")
 st.markdown("**Agrupamento global** — páginas com a mesma TAG são reunidas mesmo que estejam distantes no PDF.")
 
-TAXA_SIMILARIDADE = st.slider("Taxa mínima de similaridade (%)", min_value=80, max_value=98, value=88, step=1)
+TAXA_SIMILARIDADE = st.slider("Taxa mínima de similaridade (%)", min_value=80, max_value=100, value=100, step=1)
 
 def normalizar_tag(texto: str) -> str:
     texto = texto.upper().strip()
