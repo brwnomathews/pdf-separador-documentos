@@ -9,8 +9,18 @@ from PIL import Image
 # Configuração da Página Streamlit
 st.set_page_config(page_title="REFRAMINAS DocAI v3", page_icon="🤖", layout="wide")
 
+# 1. Acessando a chave da API através do st.secrets de forma segura
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+except KeyError:
+    st.error("❌ Chave API não encontrada. Por favor, configure 'GEMINI_API_KEY' nos Secrets do Streamlit Cloud.")
+    st.stop() # Para a execução do app até que a chave seja configurada
+
+# Inicializando o Gemini com a chave secreta
+genai.configure(api_key=api_key)
+
 st.sidebar.title("⚙️ Configurações")
-api_key = st.sidebar.text_input("Sua Chave API Gemini:", type="password")
+st.sidebar.success("✅ Chave API carregada dos Secrets de forma segura!")
 
 st.title("📄 REFRAMINAS DocAI - Motor Streamlit")
 st.markdown("Faça o upload de um PDF desordenado. A IA irá **separar, classificar, rotacionar e agrupar** tudo em um arquivo ZIP final.")
@@ -34,8 +44,8 @@ JSON ESPERADO: {"nome": "NOME COMPLETO", "tipo": "TIPO DOC", "data": "DDMMAAAA",
 
 uploaded_file = st.file_uploader("Envie o PDF mestre contendo várias páginas", type=["pdf"])
 
-if st.button("🚀 Iniciar Processamento Inteligente") and uploaded_file and api_key:
-    genai.configure(api_key=api_key)
+# O botão não precisa mais verificar se a api_key foi digitada, pois o st.stop() já tratou isso no início
+if st.button("🚀 Iniciar Processamento Inteligente") and uploaded_file:
     
     # Configurando o modelo especificado
     model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
@@ -54,13 +64,13 @@ if st.button("🚀 Iniciar Processamento Inteligente") and uploaded_file and api
         for i in range(total_paginas):
             status_texto.text(f"🧠 Analisando página {i+1} de {total_paginas}...")
             
-            # 1. Converter página em Imagem para a IA "ver"
+            # Converter página em Imagem para a IA "ver"
             page = doc.load_page(i)
             pix = page.get_pixmap(dpi=150)
             img_bytes = pix.tobytes("jpeg")
             img = Image.open(io.BytesIO(img_bytes))
             
-            # 2. Enviar para o Gemini
+            # Enviar para o Gemini
             try:
                 response = model.generate_content([PROMPT_SISTEMA, img])
                 texto_limpo = response.text.strip().replace("```json", "").replace("```", "")
@@ -87,7 +97,7 @@ if st.button("🚀 Iniciar Processamento Inteligente") and uploaded_file and api
             
         status_texto.text("📦 Montando arquivos e gerando ZIP...")
         
-        # 3. Montagem do ZIP final
+        # Montagem do ZIP final
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             
@@ -97,7 +107,7 @@ if st.button("🚀 Iniciar Processamento Inteligente") and uploaded_file and api
                 for pg_info in paginas:
                     # Copia a página original
                     novo_pdf.insert_pdf(doc, from_page=pg_info["index"], to_page=pg_info["index"])
-                    pg_copiada = novo_pdf[-1] # Pega a última página inserida
+                    pg_copiada = novo_pdf[-1]
                     
                     # Corrige a rotação se a IA detectou que estava torto
                     rotacao_ia = pg_info["rotacao"]
@@ -113,7 +123,7 @@ if st.button("🚀 Iniciar Processamento Inteligente") and uploaded_file and api
         
         st.success("✅ Processamento concluído com sucesso!")
         
-        # 4. Botão de Download do ZIP
+        # Botão de Download do ZIP
         st.download_button(
             label="📥 Baixar Pasta Compactada (.ZIP)",
             data=zip_buffer.getvalue(),
