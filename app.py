@@ -1,159 +1,123 @@
 import streamlit as st
-import pymupdf
-from io import BytesIO
+import fitz  # PyMuPDF
+import google.generativeai as genai
+import json
+import io
 import zipfile
-import time
-from datetime import date
-from openai import OpenAI
-import re
+from PIL import Image
 
-st.set_page_config(page_title="Separador por TAG - IA Simples", layout="wide")
+# Configuração da Página Streamlit
+st.set_page_config(page_title="REFRAMINAS DocAI v3", page_icon="🤖", layout="wide")
 
-st.title("📄 Separador de PDFs por TAG")
-st.markdown("**Modo Simples com IA** — Llama 3.3 70B (free) usando o texto já existente no PDF")
+st.sidebar.title("⚙️ Configurações")
+api_key = st.sidebar.text_input("Sua Chave API Gemini:", type="password")
 
-# ====================== CONFIGURAÇÃO ======================
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=st.secrets.get("OPENROUTER_API_KEY", "")
-)
+st.title("📄 REFRAMINAS DocAI - Motor Streamlit")
+st.markdown("Faça o upload de um PDF desordenado. A IA irá **separar, classificar, rotacionar e agrupar** tudo em um arquivo ZIP final.")
 
-ia_cache = {}
+# O Super Prompt Consolidado
+PROMPT_SISTEMA = """Você é um perito em documentos da REFRAMINAS. Analise esta página e retorne APENAS um JSON.
+  
+DETERMINE:
+1. TIPO: 
+   - FICHA DE EPI (com datas) ou FICHA DE EPI SEM DATA.
+   - CERTIFICADOS (NR01, 06, 12, 18, 33, 34, 35).
+   - LISTA DE PRESENCA NRXX.
+   - ORDEM DE SERVICO (Layout A ou B).
+   - RH: FICHA DE REGISTRO, CONTRATO DE TRABALHO, OPCAO VALE TRANSPORTE.
+   - Outros: PPR, IT, TERMO DE RESPONSABILIDADE, ENSAIO DE VEDACAO, PPAE CSN.
+2. NOME: Extraia o nome do colaborador seguindo os padrões do layout.
+3. DATA: Formato DDMMAAAA (priorize datas de admissão/vigência para RH, e data de término para listas).
+4. ROTACAO: Identifique se o texto está rotacionado na imagem. Retorne: 0, 90, 180 ou 270 (graus no sentido horário para ficar legível).
 
-def extrair_tag_com_ia(texto_pagina: str, page_num: int) -> str:
-    if not st.secrets.get("OPENROUTER_API_KEY"):
-        st.error("❌ Configure OPENROUTER_API_KEY nos Secrets.")
-        st.stop()
+JSON ESPERADO: {"nome": "NOME COMPLETO", "tipo": "TIPO DOC", "data": "DDMMAAAA", "rotacao": 0}"""
 
-    cache_key = f"page_{page_num}"
-    if cache_key in ia_cache:
-        return ia_cache[cache_key]
+uploaded_file = st.file_uploader("Envie o PDF mestre contendo várias páginas", type=["pdf"])
 
-    try:
-        prompt = f"""
-Analise o texto abaixo e extraia a TAG que está entre os X's.
-
-Texto da página {page_num}:
-{texto_pagina}
-
-Formato típico: XXXXX Nome completo - NR01 - 20122025 XXXXX
-
-Regras:
-- Retorne APENAS a TAG limpa no formato: "Nome Completo - NR01 - 20122025"
-- Corrija erros comuns de OCR (O → 0, I/l → 1)
-- Se não encontrar TAG clara, retorne exatamente: SEM_TAG
-- Não coloque explicação, aspas ou texto extra.
-"""
-
-        response = client.chat.completions.create(
-            model="meta-llama/llama-3.3-70b-instruct:free",   # ← Modelo gratuito atual e estável
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=100
-        )
-
-        tag = response.choices[0].message.content.strip() if response.choices[0].message.content else "SEM_TAG"
-        ia_cache[cache_key] = tag
-        return tag
-
-    except Exception as e:
-        st.warning(f"Erro na IA (página {page_num}): {str(e)[:120]}")
-        return f"SEM_TAG_PAG_{page_num}"
-
-def normalizar_tag(texto: str) -> str:
-    if not texto or "SEM_TAG" in texto.upper():
-        return texto
-    texto = texto.upper().strip()
-    texto = re.sub(r'\s+', ' ', texto)
-    texto = re.sub(r'NR0?[I1LO]+', 'NR01', texto)
-    texto = re.sub(r'O', '0', texto)
-    texto = re.sub(r'[I|L]', '1', texto)
-    return texto.strip()
-
-# ====================== PROCESSAMENTO ======================
-uploaded_files = st.file_uploader("Arraste ou selecione os PDFs", type="pdf", accept_multiple_files=True)
-
-if uploaded_files and st.button("🚀 Iniciar Processamento Simples com IA", type="primary"):
+if st.button("🚀 Iniciar Processamento Inteligente") and uploaded_file and api_key:
+    genai.configure(api_key=api_key)
     
-    if not st.secrets.get("OPENROUTER_API_KEY"):
-        st.error("Configure sua chave OPENROUTER_API_KEY nos Secrets.")
-        st.stop()
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    log_container = st.container()
-    log_container.markdown("### 📜 Log em Tempo Real")
-    log_area = log_container.empty()
-
-    full_log = ""
-    zip_buffer = BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-        total_arquivos = len(uploaded_files)
+    # Configurando o modelo especificado
+    model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
+    
+    with st.spinner("Lendo o arquivo PDF..."):
+        pdf_bytes = uploaded_file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        total_paginas = len(doc)
         
-        for idx, uploaded_file in enumerate(uploaded_files):
-            status_text.info(f"Processando: **{uploaded_file.name}**")
-            pdf_bytes = uploaded_file.read()
-            doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        grupos_documentos = {}
+        
+        barra_progresso = st.progress(0)
+        status_texto = st.empty()
+        
+        # Processamento página por página
+        for i in range(total_paginas):
+            status_texto.text(f"🧠 Analisando página {i+1} de {total_paginas}...")
             
-            grupos = {}   # tag_normalizada -> lista de páginas
+            # 1. Converter página em Imagem para a IA "ver"
+            page = doc.load_page(i)
+            pix = page.get_pixmap(dpi=150)
+            img_bytes = pix.tobytes("jpeg")
+            img = Image.open(io.BytesIO(img_bytes))
             
-            for page_num in range(len(doc)):
-                perc = int(((idx + (page_num + 1) / len(doc)) / total_arquivos) * 100)
-                progress_bar.progress(perc)
+            # 2. Enviar para o Gemini
+            try:
+                response = model.generate_content([PROMPT_SISTEMA, img])
+                texto_limpo = response.text.strip().replace("```json", "").replace("```", "")
+                info = json.loads(texto_limpo)
                 
-                page = doc[page_num]
-                texto_pagina = page.get_text("text")   # usa o OCR já feito
+                # Chave de agrupamento
+                chave = f"{info.get('nome', 'DESCONHECIDO')} - {info.get('tipo', 'INDEFINIDO')} - {info.get('data', 'SEM_DATA')}"
                 
-                tag_da_pagina = extrair_tag_com_ia(texto_pagina, page_num + 1)
-                tag_normalizada = normalizar_tag(tag_da_pagina)
+                if chave not in grupos_documentos:
+                    grupos_documentos[chave] = []
                 
-                log_msg = f"**Página {page_num+1}** → `{tag_da_pagina}`"
-                full_log += log_msg + "\n\n"
-                log_area.markdown(full_log)
+                grupos_documentos[chave].append({
+                    "index": i,
+                    "rotacao": info.get("rotacao", 0)
+                })
                 
-                # Agrupamento simples
-                if tag_normalizada in grupos:
-                    grupos[tag_normalizada].append(page_num)
-                    full_log += f"✅ Adicionada ao grupo existente\n---\n"
-                else:
-                    grupos[tag_normalizada] = [page_num]
-                    full_log += f"🆕 Novo grupo criado\n---\n"
+                st.toast(f"Página {i+1} classificada: {chave}")
                 
-                log_area.markdown(full_log)
+            except Exception as e:
+                st.error(f"Erro na página {i+1}: {e}")
             
-            # Salvar grupos
-            full_log += f"**📦 Criando {len(grupos)} arquivos para {uploaded_file.name}**\n\n"
-            log_area.markdown(full_log)
+            # Atualizar progresso
+            barra_progresso.progress((i + 1) / total_paginas)
             
-            for tag_norm, paginas in grupos.items():
-                novo_doc = pymupdf.open()
-                for p in sorted(paginas):
-                    novo_doc.insert_pdf(doc, from_page=p, to_page=p)
-                
-                pdf_bytes_out = novo_doc.tobytes()
-                nome_arquivo = f"{tag_norm}.pdf" if "SEM_TAG" not in tag_norm.upper() else f"SEM_TAG_PAG_{paginas[0]+1}.pdf"
-                
-                zip_file.writestr(nome_arquivo, pdf_bytes_out)
-                novo_doc.close()
-                
-                full_log += f"✅ Salvo: `{nome_arquivo}` • {len(paginas)} páginas\n"
-                log_area.markdown(full_log)
+        status_texto.text("📦 Montando arquivos e gerando ZIP...")
+        
+        # 3. Montagem do ZIP final
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             
-            doc.close()
-            time.sleep(0.3)
-
-    zip_buffer.seek(0)
-    progress_bar.progress(100)
-    status_text.success("✅ Processamento concluído!")
-
-    data_atual = date.today().isoformat()
-    st.download_button(
-        label="📥 Baixar ZIP",
-        data=zip_buffer,
-        file_name=f"Lote_IA_Simples_{data_atual}.zip",
-        mime="application/zip",
-        type="primary"
-    )
-
-st.caption("Versão simples • Llama 3.3 70B (free) • Usa texto já existente no PDF")
+            for chave, paginas in grupos_documentos.items():
+                novo_pdf = fitz.open()
+                
+                for pg_info in paginas:
+                    # Copia a página original
+                    novo_pdf.insert_pdf(doc, from_page=pg_info["index"], to_page=pg_info["index"])
+                    pg_copiada = novo_pdf[-1] # Pega a última página inserida
+                    
+                    # Corrige a rotação se a IA detectou que estava torto
+                    rotacao_ia = pg_info["rotacao"]
+                    if rotacao_ia != 0:
+                        pg_copiada.set_rotation(rotacao_ia)
+                
+                # Salva o PDF individual em memória e adiciona ao ZIP
+                pdf_bytes_final = novo_pdf.write()
+                zip_file.writestr(f"{chave}.pdf", pdf_bytes_final)
+                novo_pdf.close()
+                
+        doc.close()
+        
+        st.success("✅ Processamento concluído com sucesso!")
+        
+        # 4. Botão de Download do ZIP
+        st.download_button(
+            label="📥 Baixar Pasta Compactada (.ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="REFRAMINAS_Documentos_Processados.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
