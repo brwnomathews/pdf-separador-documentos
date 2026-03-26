@@ -7,127 +7,115 @@ import zipfile
 from PIL import Image
 
 # Configuração da Página Streamlit
-st.set_page_config(page_title="REFRAMINAS DocAI v3", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="REFRAMINAS DocAI v4", page_icon="🤖", layout="wide")
 
-# 1. Acessando a chave da API através do st.secrets de forma segura
+# Acessando a chave da API de forma segura
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
 except KeyError:
-    st.error("❌ Chave API não encontrada. Por favor, configure 'GEMINI_API_KEY' nos Secrets do Streamlit Cloud.")
-    st.stop() # Para a execução do app até que a chave seja configurada
+    st.error("❌ Chave API não encontrada nos Secrets.")
+    st.stop()
 
-# Inicializando o Gemini com a chave secreta
 genai.configure(api_key=api_key)
 
 st.sidebar.title("⚙️ Configurações")
-st.sidebar.success("✅ Chave API carregada dos Secrets de forma segura!")
+st.sidebar.success("✅ Sistema Híbrido: TAGs + IA Ativado")
 
-st.title("📄 REFRAMINAS DocAI - Motor Streamlit")
-st.markdown("Faça o upload de um PDF desordenado. A IA irá **separar, classificar, rotacionar e agrupar** tudo em um arquivo ZIP final.")
+st.title("📄 REFRAMINAS DocAI - Leitura por TAGs")
+st.markdown("A IA irá procurar a TAG padrão `XXXXX [Dados] XXXXX` em cada página, corrigir a rotação, e agrupar o PDF final com precisão absoluta.")
 
-# O Super Prompt Consolidado
-PROMPT_SISTEMA = """Você é um perito em documentos da REFRAMINAS. Analise esta página e retorne APENAS um JSON.
-  
-DETERMINE:
-1. TIPO: 
-   - FICHA DE EPI (com datas) ou FICHA DE EPI SEM DATA.
-   - CERTIFICADOS (NR01, 06, 12, 18, 33, 34, 35).
-   - LISTA DE PRESENCA NRXX.
-   - ORDEM DE SERVICO (Layout A ou B).
-   - RH: FICHA DE REGISTRO, CONTRATO DE TRABALHO, OPCAO VALE TRANSPORTE.
-   - Outros: PPR, IT, TERMO DE RESPONSABILIDADE, ENSAIO DE VEDACAO, PPAE CSN.
-2. NOME: Extraia o nome do colaborador seguindo os padrões do layout.
-3. DATA: Formato DDMMAAAA (priorize datas de admissão/vigência para RH, e data de término para listas).
-4. ROTACAO: Identifique se o texto está rotacionado na imagem. Retorne: 0, 90, 180 ou 270 (graus no sentido horário para ficar legível).
+# ==========================================
+# O NOVO SUPER PROMPT - SIMPLES E LETAL
+# ==========================================
+PROMPT_SISTEMA = """Você é um sistema de extração de dados de alta precisão da REFRAMINAS.
+Todas as páginas deste documento contêm uma TAG de identificação impressa, delimitada por "XXXXX" no início e no fim.
+Sua única tarefa é localizar essa TAG e a orientação da página.
 
-JSON ESPERADO: {"nome": "NOME COMPLETO", "tipo": "TIPO DOC", "data": "DDMMAAAA", "rotacao": 0}"""
+REGRAS:
+1. ARQUIVO: Encontre o texto que está entre os "XXXXX" (por exemplo: XXXXX Bruno Cesar Mateus De Oliveira - NR01 - 12122026 XXXXX). 
+   Extraia apenas o conteúdo interno, removendo os "X" e os espaços em branco nas pontas.
+2. ROTACAO: O documento escaneado está torto? Retorne 0, 90, 180 ou 270 (graus no sentido horário necessários para o texto ficar em pé e legível).
 
-uploaded_file = st.file_uploader("Envie o PDF mestre contendo várias páginas", type=["pdf"])
+Retorne APENAS um objeto JSON válido, sem explicações ou formatação markdown.
 
-# O botão não precisa mais verificar se a api_key foi digitada, pois o st.stop() já tratou isso no início
-if st.button("🚀 Iniciar Processamento Inteligente") and uploaded_file:
+JSON ESPERADO: {"arquivo": "TEXTO EXTRAIDO DA TAG", "rotacao": 0}"""
+
+uploaded_file = st.file_uploader("Envie o PDF mestre contendo as páginas com as TAGs XXXXX", type=["pdf"])
+
+if st.button("🚀 Processar Documentos por TAG") and uploaded_file:
     
-    # Configurando o modelo especificado
     model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
     
-    with st.spinner("Lendo o arquivo PDF..."):
+    with st.spinner("Lendo o arquivo PDF mestre..."):
         pdf_bytes = uploaded_file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         total_paginas = len(doc)
         
         grupos_documentos = {}
-        
         barra_progresso = st.progress(0)
         status_texto = st.empty()
         
-        # Processamento página por página
         for i in range(total_paginas):
-            status_texto.text(f"🧠 Analisando página {i+1} de {total_paginas}...")
+            status_texto.text(f"🔍 Procurando TAG na página {i+1} de {total_paginas}...")
             
-            # Converter página em Imagem para a IA "ver"
+            # Converter página em imagem
             page = doc.load_page(i)
             pix = page.get_pixmap(dpi=150)
             img_bytes = pix.tobytes("jpeg")
             img = Image.open(io.BytesIO(img_bytes))
             
-            # Enviar para o Gemini
             try:
+                # Chama a IA
                 response = model.generate_content([PROMPT_SISTEMA, img])
                 texto_limpo = response.text.strip().replace("```json", "").replace("```", "")
                 info = json.loads(texto_limpo)
                 
-                # Chave de agrupamento
-                chave = f"{info.get('nome', 'DESCONHECIDO')} - {info.get('tipo', 'INDEFINIDO')} - {info.get('data', 'SEM_DATA')}"
+                # A chave agora é diretamente o nome extraído da TAG!
+                nome_arquivo = info.get("arquivo", f"PAGINA_{i+1}_SEM_TAG_ENCONTRADA")
                 
-                if chave not in grupos_documentos:
-                    grupos_documentos[chave] = []
+                if nome_arquivo not in grupos_documentos:
+                    grupos_documentos[nome_arquivo] = []
                 
-                grupos_documentos[chave].append({
+                grupos_documentos[nome_arquivo].append({
                     "index": i,
                     "rotacao": info.get("rotacao", 0)
                 })
                 
-                st.toast(f"Página {i+1} classificada: {chave}")
+                st.toast(f"Página {i+1} identificada: {nome_arquivo}")
                 
             except Exception as e:
-                st.error(f"Erro na página {i+1}: {e}")
+                st.error(f"Erro ao processar página {i+1}: {e}")
             
-            # Atualizar progresso
             barra_progresso.progress((i + 1) / total_paginas)
             
-        status_texto.text("📦 Montando arquivos e gerando ZIP...")
+        status_texto.text("📦 Empacotando documentos agrupados pelas TAGs...")
         
         # Montagem do ZIP final
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             
-            for chave, paginas in grupos_documentos.items():
+            for nome_arquivo, paginas in grupos_documentos.items():
                 novo_pdf = fitz.open()
                 
                 for pg_info in paginas:
-                    # Copia a página original
+                    # Copia a página e corrige rotação
                     novo_pdf.insert_pdf(doc, from_page=pg_info["index"], to_page=pg_info["index"])
                     pg_copiada = novo_pdf[-1]
-                    
-                    # Corrige a rotação se a IA detectou que estava torto
-                    rotacao_ia = pg_info["rotacao"]
-                    if rotacao_ia != 0:
-                        pg_copiada.set_rotation(rotacao_ia)
+                    if pg_info["rotacao"] != 0:
+                        pg_copiada.set_rotation(pg_info["rotacao"])
                 
-                # Salva o PDF individual em memória e adiciona ao ZIP
+                # Salva no ZIP com o nome exato da TAG + ".pdf"
                 pdf_bytes_final = novo_pdf.write()
-                zip_file.writestr(f"{chave}.pdf", pdf_bytes_final)
+                zip_file.writestr(f"{nome_arquivo}.pdf", pdf_bytes_final)
                 novo_pdf.close()
                 
         doc.close()
+        st.success("✅ Processamento concluído! Todos os documentos foram separados e nomeados conforme as TAGs.")
         
-        st.success("✅ Processamento concluído com sucesso!")
-        
-        # Botão de Download do ZIP
         st.download_button(
-            label="📥 Baixar Pasta Compactada (.ZIP)",
+            label="📥 Baixar ZIP com Documentos Organizados",
             data=zip_buffer.getvalue(),
-            file_name="REFRAMINAS_Documentos_Processados.zip",
+            file_name="REFRAMINAS_Docs_Por_TAG.zip",
             mime="application/zip",
             use_container_width=True
         )
