@@ -8,6 +8,7 @@ from io import BytesIO
 import zipfile
 from PIL import Image
 import time
+from datetime import date   # ← Correção aqui
 
 st.set_page_config(page_title="Separador por TAG - Tempo Real", layout="wide")
 
@@ -45,12 +46,12 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Container para o log em tempo real (melhor que expander para atualizações frequentes)
+    # Container para o log em tempo real
     log_container = st.container()
-    log_title = log_container.markdown("### 📜 Log em Tempo Real")
-    log_area = log_container.empty()   # Placeholder principal para o log
+    log_container.markdown("### 📜 Log em Tempo Real")
+    log_area = log_container.empty()
     
-    full_log = ""  # Vamos acumular todo o log aqui
+    full_log = ""
 
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zip_file:
@@ -65,16 +66,16 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
             grupos = {}  # tag_norm -> {"rep_nome": str, "paginas": list}
             
             for page_num in range(len(doc)):
-                # Atualiza progresso global
+                # Progresso
                 perc = int(((idx + (page_num + 1) / len(doc)) / total_arquivos) * 100)
                 progress_bar.progress(perc)
                 
-                # Processamento da página
+                # Extrair imagem da página
                 page = doc[page_num]
                 pix = page.get_pixmap(dpi=180)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # Rotação automática
+                # Rotação automática + OCR
                 text = ""
                 for angle in [0, 90, 180, 270]:
                     rotated = img.rotate(angle, expand=True)
@@ -111,9 +112,9 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
                     grupos[tag_norm] = {"rep_nome": tag_da_pagina, "paginas": [page_num]}
                     full_log += f"🆕 **Nova TAG detectada** → Iniciando novo grupo\n---\n"
                 
-                log_area.markdown(full_log)  # Atualiza o log a cada página
-                
-            # Salvar grupos
+                log_area.markdown(full_log)
+            
+            # Salvar os grupos deste arquivo
             full_log += f"**📦 Montando {len(grupos)} arquivos finais para {uploaded_file.name}...**\n\n"
             log_area.markdown(full_log)
             
@@ -132,19 +133,22 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
                 log_area.markdown(full_log)
             
             doc.close()
-            time.sleep(0.2)  # Pequeno delay para melhor visualização do log
+            time.sleep(0.2)
 
     # Finalização
     zip_buffer.seek(0)
     progress_bar.progress(100)
     status_text.success("✅ Processamento concluído com sucesso!")
     
+    # Correção: usando datetime.date.today()
+    data_atual = date.today().isoformat()
+    
     st.download_button(
         label="📥 Baixar ZIP com todos os PDFs separados",
         data=zip_buffer,
-        file_name=f"Lote_Processado_{st.date.today()}.zip",
+        file_name=f"Lote_Processado_{data_atual}.zip",
         mime="application/zip",
         type="primary"
     )
 
-st.caption("• Agrupamento global de páginas • Log em tempo real • Rotação + OCR automático")
+st.caption("• Agrupamento global de páginas • Log em tempo real • Rotação + OCR automático • Streamlit Cloud")
