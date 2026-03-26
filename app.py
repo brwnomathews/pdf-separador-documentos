@@ -18,7 +18,7 @@ st.markdown("**Usando apenas Nemotron Nano 12B 2 VL (free)** via OpenRouter")
 
 # ====================== CONFIGURAÇÕES ======================
 TAXA_SIMILARIDADE = st.slider("Taxa mínima de similaridade para agrupamento (%)", 
-                              min_value=75, max_value=98, value=87, step=1)
+                              min_value=75, max_value=100, value=100, step=1)
 
 # OpenRouter Client
 client = OpenAI(
