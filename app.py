@@ -10,6 +10,7 @@ from PIL import Image
 import time
 
 st.set_page_config(page_title="Separador por TAG - Tempo Real", layout="wide")
+
 st.title("📄 Separador de PDFs por TAG com Log em Tempo Real")
 st.markdown("**Agrupamento global** — páginas com a mesma TAG são reunidas mesmo que estejam distantes no PDF.")
 
@@ -36,38 +37,44 @@ def extrair_tag(texto: str) -> str:
         return nome if len(nome) > 3 else "SEM_TAG"
     return "SEM_TAG"
 
-# ====================== INTERFACE ======================
+# ====================== UPLOAD ======================
 uploaded_files = st.file_uploader("Arraste ou selecione os PDFs", type="pdf", accept_multiple_files=True)
 
 if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Real", type="primary"):
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
-    log_container = st.expander("📜 Janela de Log em Tempo Real", expanded=True)
-    log_area = log_container.empty()
+    
+    # Container para o log em tempo real (melhor que expander para atualizações frequentes)
+    log_container = st.container()
+    log_title = log_container.markdown("### 📜 Log em Tempo Real")
+    log_area = log_container.empty()   # Placeholder principal para o log
+    
+    full_log = ""  # Vamos acumular todo o log aqui
 
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zip_file:
         total_arquivos = len(uploaded_files)
         
         for idx, uploaded_file in enumerate(uploaded_files):
-            file_progress = (idx / total_arquivos)
-            status_text.info(f"Processando arquivo {idx+1}/{total_arquivos}: **{uploaded_file.name}**")
+            status_text.info(f"📂 Processando arquivo {idx+1}/{total_arquivos}: **{uploaded_file.name}**")
             
             pdf_bytes = uploaded_file.read()
             doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
-            # Estrutura de grupos globais (chave = tag normalizada)
             grupos = {}  # tag_norm -> {"rep_nome": str, "paginas": list}
             
             for page_num in range(len(doc)):
-                perc = int(((idx + (page_num+1)/len(doc)) / total_arquivos) * 100)
+                # Atualiza progresso global
+                perc = int(((idx + (page_num + 1) / len(doc)) / total_arquivos) * 100)
                 progress_bar.progress(perc)
                 
+                # Processamento da página
                 page = doc[page_num]
                 pix = page.get_pixmap(dpi=180)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # Rotação automática simples
+                # Rotação automática
                 text = ""
                 for angle in [0, 90, 180, 270]:
                     rotated = img.rotate(angle, expand=True)
@@ -80,8 +87,9 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
                 tag_norm = normalizar_tag(tag_da_pagina)
                 
                 # Log da página
-                log_msg = f"**Página {page_num+1}** → TAG: `{tag_da_pagina}`"
-                current_log = log_area.markdown(log_msg + "\n\n" + (log_area.markdown if hasattr(log_area, 'markdown') else ""))
+                log_msg = f"**Página {page_num+1}** → TAG encontrada: `{tag_da_pagina}`"
+                full_log += log_msg + "\n\n"
+                log_area.markdown(full_log)
                 
                 # Busca melhor grupo existente
                 melhor_sim = 0
@@ -97,17 +105,17 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
                 
                 if melhor_grupo and melhor_sim >= TAXA_SIMILARIDADE:
                     melhor_grupo["paginas"].append(page_num)
-                    log_area.markdown(f"{log_msg}\n"
-                                      f"🔗 Similaridade com grupo **{melhor_tag_rep}** = **{melhor_sim}%**\n"
-                                      f"✅ **Agrupando página {page_num+1} ao grupo existente**\n---", unsafe_allow_html=True)
+                    full_log += f"🔗 Similaridade com grupo **{melhor_tag_rep}** = **{melhor_sim}%**  \n"
+                    full_log += f"✅ **Agrupando página {page_num+1} ao grupo existente**\n---\n"
                 else:
-                    # Novo grupo
                     grupos[tag_norm] = {"rep_nome": tag_da_pagina, "paginas": [page_num]}
-                    log_area.markdown(f"{log_msg}\n"
-                                      f"🆕 **Nova TAG detectada** → Iniciando novo grupo\n---", unsafe_allow_html=True)
-            
-            # Salvar cada grupo
-            log_area.markdown(f"**📦 Montando {len(grupos)} arquivos finais para {uploaded_file.name}...**\n", unsafe_allow_html=True)
+                    full_log += f"🆕 **Nova TAG detectada** → Iniciando novo grupo\n---\n"
+                
+                log_area.markdown(full_log)  # Atualiza o log a cada página
+                
+            # Salvar grupos
+            full_log += f"**📦 Montando {len(grupos)} arquivos finais para {uploaded_file.name}...**\n\n"
+            log_area.markdown(full_log)
             
             for tag_norm, grupo in grupos.items():
                 novo_doc = pymupdf.open()
@@ -120,12 +128,13 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
                 zip_file.writestr(nome_final, pdf_bytes_out)
                 novo_doc.close()
                 
-                log_area.markdown(f"✅ **Grupo montado**: `{grupo['rep_nome']}` • **{len(paginas_ordenadas)} páginas**\n", unsafe_allow_html=True)
+                full_log += f"✅ **Grupo montado**: `{grupo['rep_nome']}` • **{len(paginas_ordenadas)} páginas**\n"
+                log_area.markdown(full_log)
             
             doc.close()
-            time.sleep(0.3)  # pequeno delay para visualização do log
+            time.sleep(0.2)  # Pequeno delay para melhor visualização do log
 
-    # Download
+    # Finalização
     zip_buffer.seek(0)
     progress_bar.progress(100)
     status_text.success("✅ Processamento concluído com sucesso!")
@@ -138,4 +147,4 @@ if uploaded_files and st.button("🚀 Iniciar Processamento com Log em Tempo Rea
         type="primary"
     )
 
-st.caption("• Agrupamento global de páginas • Log em tempo real • Rotação + OCR automático • Streamlit Community Cloud")
+st.caption("• Agrupamento global de páginas • Log em tempo real • Rotação + OCR automático")
