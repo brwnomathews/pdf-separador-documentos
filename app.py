@@ -10,7 +10,7 @@ import re
 st.set_page_config(page_title="Separador por TAG - IA Simples", layout="wide")
 
 st.title("📄 Separador de PDFs por TAG")
-st.markdown("**Modo Simples com IA** — DeepSeek R1 (free) usando o texto já existente no PDF")
+st.markdown("**Modo Simples com IA** — Llama 3.3 70B (free) usando o texto já existente no PDF")
 
 # ====================== CONFIGURAÇÃO ======================
 client = OpenAI(
@@ -46,7 +46,7 @@ Regras:
 """
 
         response = client.chat.completions.create(
-            model="deepseek/deepseek-r1:free",     # ← Modelo gratuito atualizado
+            model="meta-llama/llama-3.3-70b-instruct:free",   # ← Modelo gratuito atual e estável
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=100
@@ -103,7 +103,7 @@ if uploaded_files and st.button("🚀 Iniciar Processamento Simples com IA", typ
                 progress_bar.progress(perc)
                 
                 page = doc[page_num]
-                texto_pagina = page.get_text("text")   # usa o OCR já existente
+                texto_pagina = page.get_text("text")   # usa o OCR já feito
                 
                 tag_da_pagina = extrair_tag_com_ia(texto_pagina, page_num + 1)
                 tag_normalizada = normalizar_tag(tag_da_pagina)
@@ -156,4 +156,4 @@ if uploaded_files and st.button("🚀 Iniciar Processamento Simples com IA", typ
         type="primary"
     )
 
-st.caption("Versão simples • DeepSeek R1 (free) • Usa texto já existente no PDF")
+st.caption("Versão simples • Llama 3.3 70B (free) • Usa texto já existente no PDF")
