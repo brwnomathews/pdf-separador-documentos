@@ -44,7 +44,10 @@ uploaded_file = st.file_uploader("Selecione o arquivo PDF digitalizado", type=["
 
 if st.button("🚀 Iniciar Processamento", use_container_width=True) and uploaded_file:
     
-    model = genai.GenerativeModel('gemini-3.1-flash-lite')
+    # Definição do modelo e da string de identificação para o terminal
+    model_id = 'gemini-3.1-flash-lite'
+    model = genai.GenerativeModel(model_id)
+    processador_info = "IA: Gemini 3.1 Flash Lite"
     
     st.markdown("### 💻 Terminal de Processamento")
     terminal_placeholder = st.empty()
@@ -102,7 +105,9 @@ if st.button("🚀 Iniciar Processamento", use_container_width=True) and uploade
                 })
                 
                 status_rotacao = f" (Girando {rotacao}º)" if rotacao != 0 else ""
-                add_log(f"[OK] Identificado: '{nome_arquivo}'{status_rotacao}")
+                
+                # Incrementação aplicada aqui: Adicionando a informação do processador no log
+                add_log(f"[OK - Processado por {processador_info}] Identificado: '{nome_arquivo}'{status_rotacao}")
                 
             except Exception as e:
                 add_log(f"[ERRO] Falha ao processar página {i+1}. Detalhe: {e}")
