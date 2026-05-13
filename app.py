@@ -44,7 +44,7 @@ uploaded_file = st.file_uploader("Selecione o arquivo PDF digitalizado", type=["
 
 if st.button("🚀 Iniciar Processamento", use_container_width=True) and uploaded_file:
     
-    model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
+    model = genai.GenerativeModel('gemini-3.1-flash-lite')
     
     st.markdown("### 💻 Terminal de Processamento")
     terminal_placeholder = st.empty()
