@@ -4,15 +4,13 @@ import google.generativeai as genai
 import json
 import io
 import zipfile
-import re
-import pytesseract  # Biblioteca para o Tesseract OCR
 from PIL import Image
 from datetime import datetime
 
 # Configuração da Página Streamlit (limpa e expandida)
 st.set_page_config(page_title="REFRAMINAS DocAI", page_icon="📄", layout="wide")
 
-# Acessando a chave da API de forma invisível para o usuário final
+# Acessando a chave da API de forma 100% invisível para o usuário final
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
 except KeyError:
@@ -23,10 +21,10 @@ genai.configure(api_key=api_key)
 
 # Cabeçalho Principal Simplificado
 st.title("📄 REFRAMINAS DocAI")
-st.markdown("Faça o upload do PDF mestre. O sistema tentará ler via OCR rápido (Tesseract) e usará Inteligência Artificial (Gemini) nos casos complexos para extrair as TAGs e ajustar a rotação.")
+st.markdown("Faça o upload do PDF mestre. O sistema irá ler as TAGs de identificação, corrigir a orientação das páginas e gerar um arquivo ZIP com os documentos organizados.")
 
 # ==========================================
-# O SUPER PROMPT DE TAGS (Para o Gemini)
+# O SUPER PROMPT DE TAGS
 # ==========================================
 PROMPT_SISTEMA = """Você é um sistema de extração de dados de alta precisão da REFRAMINAS.
 Todas as páginas deste documento contêm uma TAG de identificação impressa, delimitada por "XXXXX" no início e no fim.
@@ -46,8 +44,10 @@ uploaded_file = st.file_uploader("Selecione o arquivo PDF digitalizado", type=["
 
 if st.button("🚀 Iniciar Processamento", use_container_width=True) and uploaded_file:
     
-    # Inicialização do modelo Gemini
-    model = genai.GenerativeModel('gemini-3.1-flash-lite')
+    # Definição do modelo e da string de identificação para o terminal
+    model_id = 'gemini-3.1-flash-lite'
+    model = genai.GenerativeModel(model_id)
+    processador_info = "IA: Gemini 3.1 Flash Lite"
     
     st.markdown("### 💻 Terminal de Processamento")
     terminal_placeholder = st.empty()
@@ -70,7 +70,7 @@ if st.button("🚀 Iniciar Processamento", use_container_width=True) and uploade
         """
         terminal_placeholder.markdown(html_content, unsafe_allow_html=True)
     
-    with st.spinner("Analisando documentos com motor Híbrido (Tesseract + IA)..."):
+    with st.spinner("Analisando documentos..."):
         pdf_bytes = uploaded_file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         total_paginas = len(doc)
@@ -88,60 +88,29 @@ if st.button("🚀 Iniciar Processamento", use_container_width=True) and uploade
             img_bytes = pix.tobytes("jpeg")
             img = Image.open(io.BytesIO(img_bytes))
             
-            nome_arquivo = None
-            rotacao = 0
-            processador_info = ""
-
-            # ==========================================
-            # TENTATIVA 1: TESSERACT OCR RÁPIDO
-            # ==========================================
             try:
-                # Extrai o texto cru da imagem
-                texto_ocr = pytesseract.image_to_string(img)
+                response = model.generate_content([PROMPT_SISTEMA, img])
+                texto_limpo = response.text.strip().replace("```json", "").replace("```", "")
+                info = json.loads(texto_limpo)
                 
-                # Busca via expressão regular tudo que está entre XXXXX e XXXXX
-                padrao = r"XXXXX\s*(.*?)\s*XXXXX"
-                match = re.search(padrao, texto_ocr)
+                nome_arquivo = info.get("arquivo", f"PAGINA_{i+1}_SEM_TAG_ENCONTRADA")
+                rotacao = info.get("rotacao", 0)
                 
-                if match:
-                    nome_arquivo = match.group(1).strip()
-                    rotacao = 0 # Assume 0º pois o OCR tradicional conseguiu ler o texto
-                    processador_info = "Tesseract OCR"
+                if nome_arquivo not in grupos_documentos:
+                    grupos_documentos[nome_arquivo] = []
+                
+                grupos_documentos[nome_arquivo].append({
+                    "index": i,
+                    "rotacao": rotacao
+                })
+                
+                status_rotacao = f" (Girando {rotacao}º)" if rotacao != 0 else ""
+                
+                # Incrementação aplicada aqui: Adicionando a informação do processador no log
+                add_log(f"[OK - Processado por {processador_info}] Identificado: '{nome_arquivo}'{status_rotacao}")
+                
             except Exception as e:
-                # Falha silenciosa no Tesseract para permitir fallback para a IA
-                pass
-
-            # ==========================================
-            # TENTATIVA 2: FALLBACK PARA IA (GEMINI)
-            # ==========================================
-            # Se o Tesseract não encontrou a TAG (nome_arquivo continua None), chama o Gemini
-            if not nome_arquivo:
-                add_log(f"TAG não localizada pelo OCR na página {i+1}. Acionando IA...")
-                try:
-                    response = model.generate_content([PROMPT_SISTEMA, img])
-                    texto_limpo = response.text.strip().replace("```json", "").replace("```", "")
-                    info = json.loads(texto_limpo)
-                    
-                    nome_arquivo = info.get("arquivo", f"PAGINA_{i+1}_SEM_TAG_ENCONTRADA")
-                    rotacao = info.get("rotacao", 0)
-                    processador_info = "IA: Gemini 3.1 Flash Lite"
-                except Exception as e:
-                    add_log(f"[ERRO] Falha no processamento da página {i+1}. Detalhe: {e}")
-                    nome_arquivo = f"PAGINA_{i+1}_ERRO_TOTAL"
-                    rotacao = 0
-                    processador_info = "Erro"
-
-            # Salva no grupo de documentos
-            if nome_arquivo not in grupos_documentos:
-                grupos_documentos[nome_arquivo] = []
-            
-            grupos_documentos[nome_arquivo].append({
-                "index": i,
-                "rotacao": rotacao
-            })
-            
-            status_rotacao = f" (Girando {rotacao}º)" if rotacao != 0 else ""
-            add_log(f"[OK - Processado por {processador_info}] Identificado: '{nome_arquivo}'{status_rotacao}")
+                add_log(f"[ERRO] Falha ao processar página {i+1}. Detalhe: {e}")
             
             barra_progresso.progress((i + 1) / total_paginas)
             
