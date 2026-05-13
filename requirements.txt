@@ -2,3 +2,4 @@ streamlit
 PyMuPDF
 google-generativeai
 Pillow
+pytesseract
